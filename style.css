@@ -1467,3 +1467,25 @@ body.has-fullscreen-chart {
 .app-container.device-mode-mobile .ad-dims-narrow {
   display: inline;
 }
+
+/* Company each lower panel describes. Quieter than the heading it follows, so
+   it reads as a qualifier rather than part of the panel name. */
+.panel-heading-ticker {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--slate);
+}
+
+/* Shown only in compare mode: two facilities are on screen but the panels
+   below describe one company. */
+.compare-scope-note {
+  margin: var(--section-gap) 0 0;
+  font-size: 0.78rem;
+  color: var(--slate);
+  line-height: 1.5;
+  max-width: 65ch;
+}
+
+.compare-scope-note + .lower-sections-grid {
+  margin-top: 0.85rem;
+}

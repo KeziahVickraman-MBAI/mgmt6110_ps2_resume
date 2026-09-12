@@ -1474,6 +1474,16 @@ function render() {
       <!-- CROSS-PANEL SYNTHESIS (Directly beneath hero, above lower grid) -->
       ${renderCrossPanelSynthesis()}
 
+      <!-- Compare mode puts a second company on screen, but prices and coverage
+           are fetched once, for the primary company only (selectCompareFacility
+           requests imagery and nothing else). Say so rather than leaving two
+           unlabelled panels next to two facilities. -->
+      ${
+        state.compareSymbol && FACILITIES[state.compareSymbol] && comp
+          ? `<p class="compare-scope-note">Prices and coverage below are for ${esc(symbol)} only — neither is fetched for ${esc(state.compareSymbol)}.</p>`
+          : ''
+      }
+
       <!-- LOWER GRID · PRICE & NEWS (Denser and Quieter) -->
       <div class="lower-sections-grid">
 
@@ -1485,7 +1495,9 @@ function render() {
         >
           <div>
             <div class="panel-header-bar">
-              <h2 class="panel-heading">Ninety-day close</h2>
+              <h2 class="panel-heading">Ninety-day close${
+                comp ? `<span class="panel-heading-ticker"> · ${esc(symbol)}</span>` : ''
+              }</h2>
               ${
                 state.priceData?.prices && state.priceData.prices.length > 1
                   ? `
@@ -1597,7 +1609,9 @@ function render() {
         <!-- PANEL D · NEWS -->
         <section id="panel-news" class="instrument-section news-panel-body ${state.newsState === 'loading' ? 'is-loading' : ''}">
           <div class="panel-header-bar">
-            <h2 class="panel-heading">Recent coverage</h2>
+            <h2 class="panel-heading">Recent coverage${
+              comp ? `<span class="panel-heading-ticker"> · ${esc(symbol)}</span>` : ''
+            }</h2>
             <span class="panel-attribution">The Guardian · Summary Only Licence</span>
           </div>
 

@@ -83,6 +83,9 @@ interface State {
   // NEVER refetches — the 90-day series is already in priceData and Alpha
   // Vantage would reject another call.
   chartPeriod: 30 | 90;
+  // Full-screen chart. The price panel itself becomes the overlay, so there is
+  // only ever one chart in the DOM and no duplicated element ids.
+  chartFullscreen: boolean;
 }
 
 const state: State = {
@@ -109,7 +112,8 @@ const state: State = {
   newsItems: [],
   health: null,
   deviceMode: 'desktop',
-  chartPeriod: 90
+  chartPeriod: 90,
+  chartFullscreen: false
 };
 
 // UI Expansion state (per-session, resets on lookup)
@@ -290,18 +294,45 @@ function chartY(g: ChartGeom, price: number): number {
   return g.padTop + g.chartH - ((price - g.minPrice) / g.priceRange) * g.chartH;
 }
 
-function generatePriceChartSvg(prices: PricePoint[]): string {
+// Geometry of the inline chart. Full screen passes its own so the viewBox
+// stays close to the rendered pixel size — preserveAspectRatio="none" would
+// otherwise stretch the axis text along with the plot.
+interface ChartOptions {
+  width?: number;
+  height?: number;
+  padLeft?: number;
+  padRight?: number;
+  padTop?: number;
+  padBottom?: number;
+  labelSize?: number;
+  axisSize?: number;
+}
+
+const FULLSCREEN_CHART: ChartOptions = {
+  width: 1200,
+  height: 520,
+  padLeft: 72,
+  padRight: 30,
+  padTop: 30,
+  padBottom: 44,
+  labelSize: 13,
+  axisSize: 12
+};
+
+function generatePriceChartSvg(prices: PricePoint[], opts: ChartOptions = {}): string {
   if (!prices || prices.length < 2) {
     chartGeom = null;
     return '';
   }
 
-  const width = 340;
-  const height = 180;
-  const padLeft = 45;
-  const padRight = 15;
-  const padTop = 20;
-  const padBottom = 26;
+  const width = opts.width ?? 340;
+  const height = opts.height ?? 180;
+  const padLeft = opts.padLeft ?? 45;
+  const padRight = opts.padRight ?? 15;
+  const padTop = opts.padTop ?? 20;
+  const padBottom = opts.padBottom ?? 26;
+  const labelSize = opts.labelSize ?? 10;
+  const axisSize = opts.axisSize ?? 9.5;
 
   const chartW = width - padLeft - padRight;
   const chartH = height - padTop - padBottom;
@@ -353,8 +384,8 @@ function generatePriceChartSvg(prices: PricePoint[]): string {
       <line x1="${padLeft}" y1="${getY(minPrice).toFixed(1)}" x2="${padLeft + chartW}" y2="${getY(minPrice).toFixed(1)}" stroke="#D8D9D2" stroke-dasharray="2,2" stroke-width="1" />
 
       <!-- Price Labels on Y-axis -->
-      <text x="${padLeft - 6}" y="${(getY(maxPrice) + 3).toFixed(1)}" text-anchor="end" font-size="10" fill="#6E7469" font-family="monospace">$${maxPrice.toFixed(2)}</text>
-      <text x="${padLeft - 6}" y="${(getY(minPrice) + 3).toFixed(1)}" text-anchor="end" font-size="10" fill="#6E7469" font-family="monospace">$${minPrice.toFixed(2)}</text>
+      <text x="${padLeft - 6}" y="${(getY(maxPrice) + 3).toFixed(1)}" text-anchor="end" font-size="${labelSize}" fill="#6E7469" font-family="monospace">$${maxPrice.toFixed(2)}</text>
+      <text x="${padLeft - 6}" y="${(getY(minPrice) + 3).toFixed(1)}" text-anchor="end" font-size="${labelSize}" fill="#6E7469" font-family="monospace">$${minPrice.toFixed(2)}</text>
 
       <!-- Area fill -->
       <path d="${areaPath}" fill="url(#priceGradient)" />
@@ -372,8 +403,8 @@ function generatePriceChartSvg(prices: PricePoint[]): string {
       </g>
 
       <!-- Date bounds on X-axis -->
-      <text x="${padLeft}" y="${height - 6}" text-anchor="start" font-size="9.5" fill="#6E7469">${formatDate(prices[0].date)}</text>
-      <text x="${padLeft + chartW}" y="${height - 6}" text-anchor="end" font-size="9.5" fill="#6E7469">${formatDate(prices[prices.length - 1].date)}</text>
+      <text x="${padLeft}" y="${height - 6}" text-anchor="start" font-size="${axisSize}" fill="#6E7469">${formatDate(prices[0].date)}</text>
+      <text x="${padLeft + chartW}" y="${height - 6}" text-anchor="end" font-size="${axisSize}" fill="#6E7469">${formatDate(prices[prices.length - 1].date)}</text>
 
       <!-- Transparent hit area last so it receives every pointer event -->
       <rect id="chart-hit" x="${padLeft}" y="${padTop}" width="${chartW}" height="${chartH}" fill="transparent" />
@@ -1447,26 +1478,38 @@ function render() {
       <div class="lower-sections-grid">
 
         <!-- PANEL C · PRICE -->
-        <section id="panel-price" class="instrument-section price-panel-body ${state.priceState === 'loading' ? 'is-loading' : ''}">
+        <section
+          id="panel-price"
+          class="instrument-section price-panel-body ${state.priceState === 'loading' ? 'is-loading' : ''} ${state.chartFullscreen ? 'is-fullscreen' : ''}"
+          ${state.chartFullscreen ? 'role="dialog" aria-modal="true" aria-label="Ninety-day close, full screen"' : ''}
+        >
           <div>
             <div class="panel-header-bar">
               <h2 class="panel-heading">Ninety-day close</h2>
               ${
                 state.priceData?.prices && state.priceData.prices.length > 1
                   ? `
-                <div class="chart-period-toggle" role="group" aria-label="Chart period">
-                  ${[30, 90]
-                    .map(
-                      (days) => `
-                    <button
-                      type="button"
-                      class="chart-period-btn ${state.chartPeriod === days ? 'is-active' : ''}"
-                      data-period="${days}"
-                      aria-pressed="${state.chartPeriod === days ? 'true' : 'false'}"
-                    >${days}d</button>
-                  `
-                    )
-                    .join('')}
+                <div class="price-panel-controls">
+                  <div class="chart-period-toggle" role="group" aria-label="Chart period">
+                    ${[30, 90]
+                      .map(
+                        (days) => `
+                      <button
+                        type="button"
+                        class="chart-period-btn ${state.chartPeriod === days ? 'is-active' : ''}"
+                        data-period="${days}"
+                        aria-pressed="${state.chartPeriod === days ? 'true' : 'false'}"
+                      >${days}d</button>
+                    `
+                      )
+                      .join('')}
+                  </div>
+                  <button
+                    type="button"
+                    id="chart-fullscreen-btn"
+                    class="chart-expand-btn"
+                    aria-pressed="${state.chartFullscreen ? 'true' : 'false'}"
+                  >${state.chartFullscreen ? 'Exit full screen' : 'Expand'}</button>
                 </div>
               `
                   : ''
@@ -1534,7 +1577,7 @@ function render() {
 
                   <!-- Inline SVG Chart -->
                   <div class="price-chart-wrap">
-                    ${generatePriceChartSvg(prices)}
+                    ${generatePriceChartSvg(prices, state.chartFullscreen ? FULLSCREEN_CHART : {})}
                   </div>
                 `;
               }
@@ -1890,6 +1933,34 @@ function attachEventListeners() {
     };
   });
 
+  // Full-screen chart. Re-renders from state.priceData only — expanding never
+  // refetches, for the same reason the period toggles do not.
+  const fullscreenBtn = document.getElementById('chart-fullscreen-btn');
+  if (fullscreenBtn) {
+    fullscreenBtn.onclick = () => {
+      state.chartFullscreen = !state.chartFullscreen;
+      render();
+      // Keep focus on the control across the re-render so the keyboard path
+      // is not dropped at the top of the document.
+      document.getElementById('chart-fullscreen-btn')?.focus();
+    };
+  }
+
+  // Escape leaves full screen. Assigned rather than added so repeated renders
+  // cannot stack duplicate listeners.
+  document.onkeydown = (e) => {
+    if ((e as KeyboardEvent).key === 'Escape' && state.chartFullscreen) {
+      state.chartFullscreen = false;
+      render();
+      document.getElementById('chart-fullscreen-btn')?.focus();
+    }
+  };
+
+  // Stop the page behind the overlay from scrolling.
+  if (document.body) {
+    document.body.classList.toggle('has-fullscreen-chart', state.chartFullscreen);
+  }
+
   // Synthesize toggle
   const synthBtn = document.getElementById('synthesize-btn');
   if (synthBtn) {
@@ -2009,6 +2080,7 @@ function selectCompany(company: CompanyMatch) {
   expansionState.compareInvoked = false;
   expansionState.synthesis = false;
   state.chartPeriod = 90;
+  state.chartFullscreen = false;
 
   // Merge facility with hand-entered FACILITIES entry if available
   const known = FACILITIES[company.symbol];

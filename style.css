@@ -14,6 +14,8 @@
   --price-accent: #8A6A43;  /* bronze */
   --news-wash:    #ECEFF3;  /* cool blue-grey */
   --news-accent:  #3A5A7D;  /* steel blue, a nod to the Guardian */
+  --site-wash:    #F1E9E4;  /* clay, for the facility metadata segment */
+  --site-accent:  #8A6152;
   --up:     #2F6B4F;    /* positive price movement, muted not traffic-light */
   --down:   #A33A2A;    /* negative price movement, oxide red */
 
@@ -606,10 +608,15 @@ input {
    One line: site type and footprint on the left, Site details / Compare on
    the right. Everything that used to stack below it as separate grey
    paragraphs now lives in the drawer this row opens. */
+/* The "Corporate HQ · 140 ha" row is its own segment, tinted clay so it reads
+   apart from the price sand and coverage blue. The wash separates it from the
+   hero above, so the old grey hairline would just sit on top of the tint. */
 .facility-meta-wrapper {
   margin-top: 0.75rem;
-  padding-top: 0.6rem;
-  border-top: 1px solid var(--rule);
+  padding: 0.7rem 0.9rem;
+  border-top: none;
+  border-left: 3px solid var(--site-accent);
+  background: var(--site-wash);
 }
 
 .facility-meta-row {
@@ -1302,4 +1309,72 @@ input {
 .app-container.device-mode-mobile #panel-news {
   border-top: none !important;
   padding-top: 1.25rem !important;
+}
+
+/* ---------------------------------------------------------------------------
+   FULL-SCREEN PRICE CHART
+   The price panel itself becomes the overlay, so there is only ever one chart
+   in the DOM — no duplicated ids, and the crosshair, period toggles and
+   Alpha Vantage attribution all come along unchanged.
+   --------------------------------------------------------------------------- */
+
+.price-panel-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.chart-expand-btn {
+  background: transparent;
+  border: 1px solid var(--rule);
+  padding: 0.12rem 0.5rem;
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  color: var(--slate);
+  cursor: pointer;
+  line-height: 1.35;
+}
+
+.chart-expand-btn:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
+.chart-expand-btn:focus-visible {
+  outline: 1.5px solid var(--ink);
+  outline-offset: 2px;
+}
+
+#panel-price.is-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  margin: 0;
+  overflow: auto;
+  background: var(--price-wash);
+  border-left: none;
+  border-top: 4px solid var(--price-accent);
+  padding: 1.5rem 2rem 2rem !important;
+}
+
+#panel-price.is-fullscreen .price-chart-wrap {
+  height: calc(100vh - 15rem);
+  min-height: 240px;
+}
+
+#panel-price.is-fullscreen .chart-readout {
+  font-size: 0.95rem;
+}
+
+body.has-fullscreen-chart {
+  overflow: hidden;
+}
+
+@media (max-width: 720px) {
+  #panel-price.is-fullscreen {
+    padding: 1.25rem 1rem 1.5rem !important;
+  }
+  #panel-price.is-fullscreen .price-chart-wrap {
+    height: calc(100vh - 16rem);
+  }
 }

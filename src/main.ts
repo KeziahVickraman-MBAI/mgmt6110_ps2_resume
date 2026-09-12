@@ -1042,7 +1042,7 @@ function renderSignupSection(): string {
           <div class="signup-copy">
             <h2 class="signup-heading" id="signup-heading">Track this company</h2>
             <p class="signup-status signup-status--sent" role="status" aria-live="polite">
-              Tracking ${esc(state.signupTrackedTicker || ticker)}. Check your inbox to confirm.
+              Tracking ${esc(state.signupTrackedTicker || ticker)}. We have your address — nothing is sent yet.
             </p>
           </div>
         </div>

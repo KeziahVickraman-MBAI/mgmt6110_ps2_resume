@@ -1,8 +1,16 @@
-import { scheduleAvCall } from './company.js';
+import { scheduleAvCall } from './_av.js';
 
-// In-memory price cache for 24 hours + stale fallback
+// In-memory price cache for 24 hours + stale fallback.
+//
+// This Map lives in one warm serverless instance and disappears when it is
+// recycled, so it is best-effort only. The durable layer is the CDN: fresh
+// responses carry s-maxage=86400 and are served from Vercel's edge cache.
+// Stale responses deliberately carry a short s-maxage (see STALE_CACHE_HEADER)
+// so a rate-limited answer cannot pin old figures at the edge for a full day.
 const priceCache = new Map();
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const FRESH_CACHE_HEADER = 'public, s-maxage=86400, max-age=86400';
+const STALE_CACHE_HEADER = 'public, s-maxage=300, max-age=60';
 
 export default async function handler(req, res) {
   const symbol = (req.query?.symbol || '').trim().toUpperCase();
@@ -28,7 +36,7 @@ export default async function handler(req, res) {
 
   // Serve fresh cache if available within 24h
   if (isFresh) {
-    res.setHeader('Cache-Control', 'public, s-maxage=86400, max-age=86400');
+    res.setHeader('Cache-Control', FRESH_CACHE_HEADER);
     return res.status(200).json({
       symbol,
       prices: cached.prices,
@@ -61,7 +69,7 @@ export default async function handler(req, res) {
     if (!result.ok) {
       // Check if we have stale cache to serve
       if (cached) {
-        res.setHeader('Cache-Control', 'public, s-maxage=86400, max-age=86400');
+        res.setHeader('Cache-Control', STALE_CACHE_HEADER);
         return res.status(200).json({
           symbol,
           prices: cached.prices,
@@ -88,7 +96,7 @@ export default async function handler(req, res) {
     // Check throttle after retry
     if (payload?.Information || payload?.Note) {
       if (cached) {
-        res.setHeader('Cache-Control', 'public, s-maxage=86400, max-age=86400');
+        res.setHeader('Cache-Control', STALE_CACHE_HEADER);
         return res.status(200).json({
           symbol,
           prices: cached.prices,
@@ -156,7 +164,7 @@ export default async function handler(req, res) {
       timestamp: Date.now()
     });
 
-    res.setHeader('Cache-Control', 'public, s-maxage=86400, max-age=86400');
+    res.setHeader('Cache-Control', FRESH_CACHE_HEADER);
     return res.status(200).json({
       symbol,
       prices,
@@ -166,7 +174,7 @@ export default async function handler(req, res) {
     });
   } catch (err) {
     if (cached) {
-      res.setHeader('Cache-Control', 'public, s-maxage=86400, max-age=86400');
+      res.setHeader('Cache-Control', STALE_CACHE_HEADER);
       return res.status(200).json({
         symbol,
         prices: cached.prices,

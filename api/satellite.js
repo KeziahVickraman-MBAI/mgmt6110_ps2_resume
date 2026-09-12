@@ -65,6 +65,14 @@ export default async function handler(req, res) {
         message: 'NASA_API_KEY is not configured.'
       });
     }
+    const rawLat = parseFloat(lat);
+    const rawLon = parseFloat(lon);
+    if (!Number.isFinite(rawLat) || !Number.isFinite(rawLon)) {
+      return res.status(400).json({
+        error: 'invalid_params',
+        message: "Parameters 'lat' and 'lon' must be valid numbers."
+      });
+    }
     const captureDate = (date || '2024-06-01').trim();
     const imageryUrl = `https://api.nasa.gov/planetary/earth/imagery?lon=${encodeURIComponent(lon)}&lat=${encodeURIComponent(lat)}&date=${encodeURIComponent(captureDate)}&dim=0.15&api_key=${encodeURIComponent(apiKey)}`;
     try {
@@ -111,13 +119,24 @@ export default async function handler(req, res) {
       const assetsResponse = await fetch(assetsUrl, { signal: AbortSignal.timeout(2500) });
       if (assetsResponse.ok) {
         const assetData = await assetsResponse.json();
-        const captureDate = assetData?.date ? assetData.date.split('T')[0] : searchDate;
-        landsatSuccess = true;
-        landsatData = {
-          source: 'landsat',
-          captureDate,
-          url: `/api/satellite?raw=landsat&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&date=${encodeURIComponent(captureDate)}`
-        };
+
+        // The capture date must come from the asset itself. It is NOT safe to
+        // fall back to searchDate: that is the date we *asked* for, and showing
+        // it as "Captured:" would put a fabricated date under the image. If
+        // NASA answers without a usable date we cannot caption Landsat
+        // honestly, so we treat Tier 1 as failed and fall through to Esri,
+        // whose caption is explicit that no per-tile date is published.
+        const rawDate = typeof assetData?.date === 'string' ? assetData.date.split('T')[0] : '';
+        const captureDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? rawDate : null;
+
+        if (captureDate) {
+          landsatSuccess = true;
+          landsatData = {
+            source: 'landsat',
+            captureDate,
+            url: `/api/satellite?raw=landsat&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&date=${encodeURIComponent(captureDate)}`
+          };
+        }
       }
     } catch {
       // NASA timed out or failed; silently proceed to Tier 2

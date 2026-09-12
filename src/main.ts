@@ -44,7 +44,7 @@ interface ProviderHealth {
   keyConfigured: boolean;
   answered: boolean;
   status: number | null;
-  state: 'up' | 'degraded' | 'down';
+  state: 'up' | 'degraded' | 'down' | 'unknown';
 }
 
 interface HealthData {
@@ -173,6 +173,88 @@ function formatTime(dateStr: string): string {
   } catch {
     return dateStr;
   }
+}
+
+// Escape text that came from a provider before it goes into innerHTML.
+function esc(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Only allow http(s) links through to an href attribute.
+function safeUrl(value: unknown): string {
+  const raw = String(value ?? '').trim();
+  return /^https?:\/\//i.test(raw) ? esc(raw) : '#';
+}
+
+// --- Alpha Vantage request queue ----------------------------------------
+//
+// Alpha Vantage must never see two of our calls in flight at once, and it
+// signals throttling with HTTP 200 carrying an "Information" key rather than
+// an error status — so a burst does not fail loudly, it silently returns no
+// data. The server-side mutex in api/_av.js cannot enforce this on Vercel:
+// /api/company and /api/prices are separate serverless functions with separate
+// module instances, so neither can see the other's in-flight call. The browser
+// is the one process that sees both, so the ordering is enforced here and the
+// server mutex remains only as defence in depth.
+//
+// Every fetch to an Alpha Vantage-backed route goes through this queue.
+const AV_MIN_GAP_MS = 1200;
+let avChain: Promise<unknown> = Promise.resolve();
+let avLastFinished = 0;
+
+function queueAvRequest<T>(run: () => Promise<T>): Promise<T> {
+  const result = avChain.then(async () => {
+    const sinceLast = Date.now() - avLastFinished;
+    if (sinceLast < AV_MIN_GAP_MS) {
+      await new Promise((r) => setTimeout(r, AV_MIN_GAP_MS - sinceLast));
+    }
+    try {
+      return await run();
+    } finally {
+      avLastFinished = Date.now();
+    }
+  });
+  // Keep the chain alive even if this link rejects, so one failure cannot
+  // wedge every later request.
+  avChain = result.then(
+    () => undefined,
+    () => undefined
+  );
+  return result;
+}
+
+// Satellite imagery captions. Each states what its own source can and cannot
+// show; they are licence/accuracy text and must not be reworded or merged.
+const CAPTION_LANDSAT =
+  'Landsat 8, roughly 30m per pixel, 16-day revisit. Shows site context and long-run change. It cannot resolve vehicles and is not a demand or revenue signal.';
+const CAPTION_ESRI =
+  'Esri World Imagery basemap. Capture date varies by location and is not published per tile — this shows what the site looks like, but not when. Not a demand or revenue signal.';
+const ATTRIBUTION_LANDSAT = 'NASA / Landsat 8';
+const ATTRIBUTION_ESRI = 'Esri World Imagery';
+
+// The sources actually on screen right now. In compare mode the two viewports
+// can legitimately come from different tiers (primary Landsat, comparison
+// Esri), so the caption has to describe every source being shown rather than
+// letting either one speak for both.
+function activeSatelliteSources(): Array<'landsat' | 'esri'> {
+  const sources: Array<'landsat' | 'esri'> = [];
+  if (state.satelliteState === 'loaded' && state.satelliteSource) {
+    sources.push(state.satelliteSource);
+  }
+  if (
+    state.compareSymbol &&
+    state.compareState === 'loaded' &&
+    state.compareSource &&
+    !sources.includes(state.compareSource)
+  ) {
+    sources.push(state.compareSource);
+  }
+  return sources;
 }
 
 // Generate Inline SVG Price Chart (no charting library)
@@ -544,22 +626,54 @@ function render() {
     }
   }
 
+  // /api/health does not probe Alpha Vantage — that would spend one of the 25
+  // daily requests on every page load and race the real price call. The price
+  // chip is derived from the price request the page already made, which is
+  // free and describes the symbol actually on screen.
+  const getPriceChipState = (): { dot: string; text: string } => {
+    if (state.health && !state.health.price.keyConfigured) {
+      return { dot: 'status-dot-down', text: 'down' };
+    }
+    switch (state.priceState) {
+      case 'loaded':
+      case 'empty':
+        // The provider answered; "empty" is a fact about the symbol, not a fault.
+        return { dot: 'status-dot-up', text: 'up' };
+      case 'rate-limited':
+        return { dot: 'status-dot-slate', text: 'degraded' };
+      case 'refused':
+      case 'unreachable':
+        return { dot: 'status-dot-down', text: 'down' };
+      default:
+        return { dot: 'status-dot-slate', text: 'checking…' };
+    }
+  };
+
   // Status dot indicators helper
   const getStatusChip = (providerKey: 'satellite' | 'news' | 'price', label: string) => {
-    const p = state.health ? state.health[providerKey] : null;
     let dotClass = 'status-dot-slate';
     let statusText = 'checking…';
 
-    if (p) {
-      if (p.state === 'up') {
-        dotClass = 'status-dot-up';
-        statusText = 'up';
-      } else if (p.state === 'degraded') {
-        dotClass = 'status-dot-slate';
-        statusText = 'degraded';
-      } else {
-        dotClass = 'status-dot-down';
-        statusText = 'down';
+    if (providerKey === 'price') {
+      const derived = getPriceChipState();
+      dotClass = derived.dot;
+      statusText = derived.text;
+    } else {
+      const p = state.health ? state.health[providerKey] : null;
+      if (p) {
+        if (p.state === 'up') {
+          dotClass = 'status-dot-up';
+          statusText = 'up';
+        } else if (p.state === 'degraded') {
+          dotClass = 'status-dot-slate';
+          statusText = 'degraded';
+        } else if (p.state === 'unknown') {
+          dotClass = 'status-dot-slate';
+          statusText = 'checking…';
+        } else {
+          dotClass = 'status-dot-down';
+          statusText = 'down';
+        }
       }
     }
 
@@ -607,7 +721,7 @@ function render() {
               type="text"
               autocomplete="off"
               placeholder="Company name or ticker"
-              value="${state.searchQuery}"
+              value="${esc(state.searchQuery)}"
               class="search-input w-full"
             />
           </div>
@@ -655,15 +769,15 @@ function render() {
                   (m) => `
                 <button
                   type="button"
-                  data-symbol="${m.symbol}"
+                  data-symbol="${esc(m.symbol)}"
                   class="search-result-row"
                 >
                   <div class="min-w-0 flex items-baseline gap-2">
-                    <span style="font-family: var(--font-mono); font-weight: 600; font-size: 0.85rem; color: var(--ink);">${m.symbol}</span>
-                    <span style="font-size: 0.85rem; color: var(--ink);" class="truncate">${m.name}</span>
+                    <span style="font-family: var(--font-mono); font-weight: 600; font-size: 0.85rem; color: var(--ink);">${esc(m.symbol)}</span>
+                    <span style="font-size: 0.85rem; color: var(--ink);" class="truncate">${esc(m.name)}</span>
                   </div>
                   <div class="flex items-center gap-2 shrink-0">
-                    <span style="font-size: 0.72rem; color: var(--slate);">${m.region}</span>
+                    <span style="font-size: 0.72rem; color: var(--slate);">${esc(m.region)}</span>
                     ${
                       m.facility
                         ? `<span style="font-size: 0.72rem; color: var(--up);">Facility mapped</span>`
@@ -775,10 +889,10 @@ function render() {
                 <div class="compare-viewport-container">
                   ${renderViewportContent(state.satelliteState, state.satelliteSource, state.satelliteTiles, state.satelliteImageUrl, facilityLabel)}
                   <div class="hero-scrim-overlay">
-                    <h1 class="hero-company-name" style="font-size: 1.35rem;">${name}</h1>
+                    <h1 class="hero-company-name" style="font-size: 1.35rem;">${esc(name)}</h1>
                     <div class="hero-meta-row" style="font-size: 0.75rem;">
-                      <span class="hero-ticker">${symbol}</span>
-                      ${region && region !== '—' ? `<span>·</span><span>${region}</span>` : ''}
+                      <span class="hero-ticker">${esc(symbol)}</span>
+                      ${region && region !== '—' ? `<span>·</span><span>${esc(region)}</span>` : ''}
                     </div>
                     ${
                       ninetyDayDiffStr && lastCloseVal !== null
@@ -792,7 +906,7 @@ function render() {
                     `
                         : ''
                     }
-                    <div class="hero-facility-label" style="font-size: 0.72rem; margin-top: 0.2rem;">${facilityLabel}</div>
+                    <div class="hero-facility-label" style="font-size: 0.72rem; margin-top: 0.2rem;">${esc(facilityLabel)}</div>
                   </div>
                 </div>
                 ${renderProfileStrip(comp?.facility, 'profile-details-primary')}
@@ -822,7 +936,7 @@ function render() {
               return ratioLine
                 ? `
               <div style="margin-top: 0.75rem; padding: 0.4rem 0; border-top: 1px solid var(--rule); font-size: 0.75rem; color: var(--ink); font-variant-numeric: tabular-nums;">
-                ${ratioLine}
+                ${esc(ratioLine)}
               </div>
             `
                 : '';
@@ -832,10 +946,10 @@ function render() {
               ? `
             <!-- COLLAPSED FAILED STATE: Shrunk to single line carrying existing sentence verbatim -->
             <div class="satellite-collapsed-header">
-              <h1 class="satellite-company-name">${name}</h1>
+              <h1 class="satellite-company-name">${esc(name)}</h1>
               <div class="hero-meta-row" style="color: var(--slate);">
-                <span class="hero-ticker" style="color: var(--ink);">${symbol}</span>
-                ${region && region !== '—' ? `<span>·</span><span>${region}</span>` : ''}
+                <span class="hero-ticker" style="color: var(--ink);">${esc(symbol)}</span>
+                ${region && region !== '—' ? `<span>·</span><span>${esc(region)}</span>` : ''}
               </div>
               ${
                 ninetyDayDiffStr && lastCloseVal !== null
@@ -849,7 +963,7 @@ function render() {
               `
                   : ''
               }
-              ${facilityLabel ? `<div class="hero-facility-label" style="color: var(--slate); margin-top: 0.25rem;">${facilityLabel}</div>` : ''}
+              ${facilityLabel ? `<div class="hero-facility-label" style="color: var(--slate); margin-top: 0.25rem;">${esc(facilityLabel)}</div>` : ''}
             </div>
 
             ${
@@ -871,11 +985,11 @@ function render() {
                 state.selectedCompany
                   ? `
                 <div class="hero-scrim-overlay">
-                  <h1 class="hero-company-name">${name}</h1>
+                  <h1 class="hero-company-name">${esc(name)}</h1>
                   <div class="hero-meta-row">
-                    <span class="hero-ticker">${symbol}</span>
-                    ${region && region !== '—' ? `<span>·</span><span>${region}</span>` : ''}
-                    ${facilityLabel ? `<span>·</span><span class="hero-facility-label">${facilityLabel}</span>` : ''}
+                    <span class="hero-ticker">${esc(symbol)}</span>
+                    ${region && region !== '—' ? `<span>·</span><span>${esc(region)}</span>` : ''}
+                    ${facilityLabel ? `<span>·</span><span class="hero-facility-label">${esc(facilityLabel)}</span>` : ''}
                   </div>
                   ${
                     ninetyDayDiffStr && lastCloseVal !== null
@@ -919,18 +1033,22 @@ function render() {
         <!-- Fixed Caption, ALWAYS VISIBLE with bottom-right attribution -->
         <div class="panel-bottom-bar">
           <p style="margin: 0; font-size: 0.72rem; color: var(--slate); line-height: 1.4; max-width: 65ch;">
-            ${
-              state.satelliteSource === 'esri' || state.compareSource === 'esri'
-                ? 'Esri World Imagery basemap. Capture date varies by location and is not published per tile — this shows what the site looks like, but not when. Not a demand or revenue signal.'
-                : 'Landsat 8, roughly 30m per pixel, 16-day revisit. Shows site context and long-run change. It cannot resolve vehicles and is not a demand or revenue signal.'
-            }
+            ${(() => {
+              const sources = activeSatelliteSources();
+              if (sources.length === 0) return CAPTION_LANDSAT;
+              return sources
+                .map((src) => (src === 'esri' ? CAPTION_ESRI : CAPTION_LANDSAT))
+                .join(' ');
+            })()}
           </p>
           <span class="panel-attribution">
-            ${
-              state.satelliteSource === 'esri' || state.compareSource === 'esri'
-                ? 'Esri World Imagery'
-                : 'NASA / Landsat 8'
-            }
+            ${(() => {
+              const sources = activeSatelliteSources();
+              if (sources.length === 0) return ATTRIBUTION_LANDSAT;
+              return sources
+                .map((src) => (src === 'esri' ? ATTRIBUTION_ESRI : ATTRIBUTION_LANDSAT))
+                .join(' · ');
+            })()}
           </span>
         </div>
       </section>
@@ -1056,18 +1174,18 @@ function render() {
               const renderArticle = (item: NewsItem) => `
                 <article class="news-editorial-row">
                   <h3 class="news-headline">
-                    <a href="${item.webUrl}" target="_blank" rel="noopener noreferrer">
-                      ${item.headline}
+                    <a href="${safeUrl(item.webUrl)}" target="_blank" rel="noopener noreferrer">
+                      ${esc(item.headline)}
                     </a>
                   </h3>
                   <!-- Excerpt truncated strictly to 200 characters server-side -->
                   <p class="news-excerpt">
-                    ${item.excerpt}
+                    ${esc(item.excerpt)}
                   </p>
                   <div class="news-meta-line">
-                    <time datetime="${item.date}">${formatDate(item.date)}</time>
+                    <time datetime="${esc(item.date)}">${esc(formatDate(item.date))}</time>
                     <span>·</span>
-                    <span>${item.section}</span>
+                    <span>${esc(item.section)}</span>
                   </div>
                 </article>
               `;
@@ -1292,7 +1410,9 @@ async function performCompanySearch(query: string, autoSelectFirst = false) {
   render();
 
   try {
-    const res = await fetch(`/api/company?q=${encodeURIComponent(query)}`);
+    const res = await queueAvRequest(() =>
+      fetch(`/api/company?q=${encodeURIComponent(query)}`)
+    );
     if (res.status === 429) {
       state.searchState = 'rate-limited';
       render();
@@ -1435,7 +1555,10 @@ function exitCompareMode() {
 
 // Fetch Satellite Tile via api/satellite.js
 async function fetchSatellite(company: CompanyMatch) {
-  if (!company.facility || !company.facility.lat || !company.facility.lon) {
+  // Number.isFinite, not truthiness: latitude or longitude 0 is a real
+  // coordinate and must not read as "no mapped facility".
+  const fac = company.facility;
+  if (!fac || !Number.isFinite(fac.lat) || !Number.isFinite(fac.lon)) {
     state.satelliteState = 'no-facility';
     state.satelliteSource = null;
     state.satelliteImageUrl = null;
@@ -1455,8 +1578,8 @@ async function fetchSatellite(company: CompanyMatch) {
   render();
 
   try {
-    const lat = company.facility.lat;
-    const lon = company.facility.lon;
+    const lat = fac.lat;
+    const lon = fac.lon;
     const res = await fetch(`/api/satellite?lat=${lat}&lon=${lon}`);
 
     if (res.status === 401 || res.status === 403) {
@@ -1502,7 +1625,9 @@ async function fetchPrices(symbol: string) {
   render();
 
   try {
-    const res = await fetch(`/api/prices?symbol=${encodeURIComponent(symbol)}`);
+    const res = await queueAvRequest(() =>
+      fetch(`/api/prices?symbol=${encodeURIComponent(symbol)}`)
+    );
 
     if (res.status === 401 || res.status === 403) {
       state.priceState = 'refused';

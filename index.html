@@ -9,8 +9,10 @@
     <meta property="og:description" content="Company research dashboard with ninety-day price trends, recent Guardian coverage, and NASA Landsat satellite imagery." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <!-- index.css imports ../style.css, so style.css is bundled and hashed by
+         Vite. Linking /style.css directly as well loaded it twice in dev and
+         404'd in production, where the unprocessed file is not copied to dist. -->
     <link rel="stylesheet" href="/src/index.css" />
-    <link rel="stylesheet" href="/style.css" />
   </head>
   <body class="min-h-screen">
     <div id="root"></div>

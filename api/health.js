@@ -1,3 +1,13 @@
+// Health reports whether each provider's credential is configured, and probes
+// the two providers that can be probed for free.
+//
+// Alpha Vantage is deliberately NOT probed. Its free tier allows 25 requests a
+// day, so a probe here would spend one of them on every page load just to draw
+// a status dot — and it would race the /api/prices call the client fires at
+// the same moment, which is exactly the concurrent pair Alpha Vantage must
+// never see. The client derives the price chip from the outcome of the price
+// request it already makes (see getPriceChipState in src/main.ts), which is
+// both free and more accurate than a probe of an unrelated symbol.
 export default async function handler(req, res) {
   const nasaKey = process.env.NASA_API_KEY;
   const guardianKey = process.env.GUARDIAN_API_KEY;
@@ -23,7 +33,9 @@ export default async function handler(req, res) {
       keyConfigured: Boolean(avKey && avKey.trim().length > 0),
       answered: false,
       status: null,
-      state: 'down'
+      // 'unknown' until the client's own price request resolves. Not probed
+      // here; see the note above the handler.
+      state: 'unknown'
     }
   };
 
@@ -93,34 +105,9 @@ export default async function handler(req, res) {
     }
   }
 
-  // Check Alpha Vantage status
-  if (result.price.keyConfigured) {
-    try {
-      const avRes = await fetch(
-        `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=IBM&apikey=${encodeURIComponent(avKey)}`,
-        { signal: AbortSignal.timeout(4000) }
-      );
-      result.price.status = avRes.status;
-      result.price.answered = true;
-      if (avRes.ok) {
-        const text = await avRes.clone().text();
-        if (text.includes('Information') || text.includes('Note')) {
-          result.price.state = 'degraded';
-        } else if (text.includes('Error Message')) {
-          result.price.state = 'down';
-        } else {
-          result.price.state = 'up';
-        }
-      } else if (avRes.status === 401 || avRes.status === 403) {
-        result.price.state = 'down';
-      } else {
-        result.price.state = 'degraded';
-      }
-    } catch (err) {
-      result.price.answered = false;
-      result.price.status = 504;
-      result.price.state = 'down';
-    }
+  // A missing credential is knowable without spending a request.
+  if (!result.price.keyConfigured) {
+    result.price.state = 'down';
   }
 
   res.setHeader('Cache-Control', 'no-store');

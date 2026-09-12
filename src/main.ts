@@ -1038,10 +1038,14 @@ function renderSignupSection(): string {
   if (state.signupState === 'sent') {
     return `
       <section class="signup-section" aria-labelledby="signup-heading">
-        <h2 class="signup-heading" id="signup-heading">Track this company</h2>
-        <p class="signup-status signup-status--sent" role="status" aria-live="polite">
-          Tracking ${esc(state.signupTrackedTicker || ticker)}. Check your inbox to confirm.
-        </p>
+        <div class="signup-inner">
+          <div class="signup-copy">
+            <h2 class="signup-heading" id="signup-heading">Track this company</h2>
+            <p class="signup-status signup-status--sent" role="status" aria-live="polite">
+              Tracking ${esc(state.signupTrackedTicker || ticker)}. Check your inbox to confirm.
+            </p>
+          </div>
+        </div>
         <p class="signup-honesty">
           Signups are collected but the digest isn't running yet. This form demonstrates the capture step only.
         </p>
@@ -1068,13 +1072,19 @@ function renderSignupSection(): string {
 
   return `
     <section class="signup-section" aria-labelledby="signup-heading">
-      <h2 class="signup-heading" id="signup-heading">Track this company</h2>
-      ${
-        hasCompany
-          ? `<p class="signup-sub">We'll email you when there's new Guardian coverage of ${esc(company!.name)}. One message a week at most.</p>`
-          : `<p class="signup-sub">Pick a company first.</p>`
-      }
+      <!-- Two columns so the full-width band is actually used: copy on the
+           left, controls on the right. Stacks below 820px. -->
+      <div class="signup-inner">
+        <div class="signup-copy">
+          <h2 class="signup-heading" id="signup-heading">Track this company</h2>
+          ${
+            hasCompany
+              ? `<p class="signup-sub">We'll email you when there's new Guardian coverage of ${esc(company!.name)}. One message a week at most.</p>`
+              : `<p class="signup-sub">Pick a company first.</p>`
+          }
+        </div>
 
+        <div class="signup-action">
       <form id="signup-form" class="signup-form" novalidate>
         <div class="signup-field">
           <label class="signup-label" for="signup-name">Name <span class="signup-optional">(optional)</span></label>
@@ -1118,7 +1128,9 @@ function renderSignupSection(): string {
         >${buttonLabel}</button>
       </form>
 
-      <p class="${statusClass}" role="status" aria-live="polite">${esc(statusLine)}</p>
+          <p class="${statusClass}" role="status" aria-live="polite">${esc(statusLine)}</p>
+        </div>
+      </div>
 
       <p class="signup-honesty">
         Signups are collected but the digest isn't running yet. This form demonstrates the capture step only.

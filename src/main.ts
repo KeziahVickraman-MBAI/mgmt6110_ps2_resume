@@ -1689,6 +1689,27 @@ function render() {
 
       </div>
 
+      <!-- MOCKUP AD SLOT
+           Deliberately inert: pure markup and CSS, no ad tag, no script, no
+           third-party request, no tracking pixel. The dimension label is
+           swapped by media query rather than JS so there is no resize
+           listener either. The note beneath it is part of the unit and is
+           never collapsed — a placeholder without the explanation is exactly
+           the thing being avoided. -->
+      <section class="ad-mockup-section" aria-labelledby="ad-mockup-label">
+        <div class="ad-mockup-slot">
+          <span class="ad-mockup-kicker" id="ad-mockup-label">Mockup ad slot</span>
+          <span class="ad-mockup-dims">
+            <span class="ad-dims-wide">728 × 90 leaderboard</span>
+            <span class="ad-dims-narrow">320 × 100 mobile banner</span>
+          </span>
+          <span class="ad-mockup-sub">Not a live ad unit. See note below.</span>
+        </div>
+        <p class="ad-mockup-note">
+          This slot is a mockup and will stay empty. Overberg cannot carry advertising in its current form: the Guardian developer key is registered non-commercial, Alpha Vantage's free tier is evaluation-only, and Esri's free basemap terms do not cover ad-supported sites. Filling this slot would require a Guardian commercial licence, an Alpha Vantage paid plan, and an ArcGIS Location Platform subscription or a differently-licensed imagery provider.
+        </p>
+      </section>
+
       <!-- SYNTHESIZE · computed from data already on screen -->
       ${renderSynthesisSection()}
 

@@ -79,6 +79,10 @@ interface State {
   newsItems: NewsItem[];
   health: HealthData | null;
   deviceMode: 'desktop' | 'mobile';
+  // Which slice of the already-fetched series the chart draws. Changing this
+  // NEVER refetches — the 90-day series is already in priceData and Alpha
+  // Vantage would reject another call.
+  chartPeriod: 30 | 90;
 }
 
 const state: State = {
@@ -104,7 +108,8 @@ const state: State = {
   newsState: 'idle',
   newsItems: [],
   health: null,
-  deviceMode: 'desktop'
+  deviceMode: 'desktop',
+  chartPeriod: 90
 };
 
 // UI Expansion state (per-session, resets on lookup)
@@ -112,12 +117,14 @@ interface ExpansionState {
   news: boolean;
   profile: boolean;
   compareInvoked: boolean;
+  synthesis: boolean;
 }
 
 const expansionState: ExpansionState = {
   news: false,
   profile: false,
-  compareInvoked: false
+  compareInvoked: false,
+  synthesis: false
 };
 
 // Tab title synchronizer
@@ -258,8 +265,36 @@ function activeSatelliteSources(): Array<'landsat' | 'esri'> {
 }
 
 // Generate Inline SVG Price Chart (no charting library)
+//
+// Geometry is kept in chartGeom so the hover/keyboard handlers can invert a
+// pointer position back to a data index without re-deriving any of it.
+interface ChartGeom {
+  points: PricePoint[];
+  width: number;
+  padLeft: number;
+  padTop: number;
+  chartW: number;
+  chartH: number;
+  minPrice: number;
+  priceRange: number;
+}
+
+let chartGeom: ChartGeom | null = null;
+
+function chartX(g: ChartGeom, index: number): number {
+  if (g.points.length < 2) return g.padLeft;
+  return g.padLeft + (index / (g.points.length - 1)) * g.chartW;
+}
+
+function chartY(g: ChartGeom, price: number): number {
+  return g.padTop + g.chartH - ((price - g.minPrice) / g.priceRange) * g.chartH;
+}
+
 function generatePriceChartSvg(prices: PricePoint[]): string {
-  if (!prices || prices.length < 2) return '';
+  if (!prices || prices.length < 2) {
+    chartGeom = null;
+    return '';
+  }
 
   const width = 340;
   const height = 180;
@@ -276,8 +311,11 @@ function generatePriceChartSvg(prices: PricePoint[]): string {
   const maxPrice = Math.max(...closes);
   const priceRange = maxPrice - minPrice || 1;
 
-  const getX = (index: number) => padLeft + (index / (prices.length - 1)) * chartW;
-  const getY = (price: number) => padTop + chartH - ((price - minPrice) / priceRange) * chartH;
+  const g: ChartGeom = { points: prices, width, padLeft, padTop, chartW, chartH, minPrice, priceRange };
+  chartGeom = g;
+
+  const getX = (index: number) => chartX(g, index);
+  const getY = (price: number) => chartY(g, price);
 
   const points = prices.map((p, i) => `${getX(i).toFixed(1)},${getY(p.close).toFixed(1)}`).join(' ');
   const firstX = getX(0).toFixed(1);
@@ -288,10 +326,20 @@ function generatePriceChartSvg(prices: PricePoint[]): string {
   const midPrice = minPrice + priceRange / 2;
   const isUp = prices[prices.length - 1].close >= prices[0].close;
   const strokeColor = isUp ? '#2F6B4F' : '#A33A2A';
-  const fillColor = isUp ? 'rgba(47, 107, 79, 0.08)' : 'rgba(163, 58, 42, 0.08)';
+
+  const rangeLabel = `${formatDate(prices[0].date)} to ${formatDate(prices[prices.length - 1].date)}`;
 
   return `
-    <svg class="price-chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
+    <svg
+      id="price-chart"
+      class="price-chart-svg"
+      viewBox="0 0 ${width} ${height}"
+      preserveAspectRatio="none"
+      tabindex="0"
+      role="img"
+      aria-label="Daily closing prices, ${prices.length} points, ${esc(rangeLabel)}. Use the left and right arrow keys to step through individual closes."
+      aria-describedby="chart-readout"
+    >
       <defs>
         <linearGradient id="priceGradient" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stop-color="${strokeColor}" stop-opacity="0.16" />
@@ -317,93 +365,127 @@ function generatePriceChartSvg(prices: PricePoint[]): string {
       <!-- Endpoint circle -->
       <circle cx="${lastX}" cy="${getY(prices[prices.length - 1].close).toFixed(1)}" r="3" fill="${strokeColor}" />
 
+      <!-- Crosshair, revealed on hover or keyboard focus -->
+      <g id="chart-crosshair" class="chart-crosshair" visibility="hidden" pointer-events="none">
+        <line id="chart-crosshair-line" y1="${padTop}" y2="${padTop + chartH}" stroke="#1B1F1A" stroke-width="1" stroke-dasharray="3,2" opacity="0.55" />
+        <circle id="chart-crosshair-dot" r="3.5" fill="${strokeColor}" stroke="#FBFBF8" stroke-width="1.5" />
+      </g>
+
       <!-- Date bounds on X-axis -->
       <text x="${padLeft}" y="${height - 6}" text-anchor="start" font-size="9.5" fill="#6E7469">${formatDate(prices[0].date)}</text>
       <text x="${padLeft + chartW}" y="${height - 6}" text-anchor="end" font-size="9.5" fill="#6E7469">${formatDate(prices[prices.length - 1].date)}</text>
+
+      <!-- Transparent hit area last so it receives every pointer event -->
+      <rect id="chart-hit" x="${padLeft}" y="${padTop}" width="${chartW}" height="${chartH}" fill="transparent" />
     </svg>
   `;
 }
 
-// Render site profile strip directly under imagery (collapsed to single line, expands to four fields + provenance)
-function renderProfileStrip(fac: Facility | FacilityEntry | null | undefined, drawerId = 'profile-details-drawer'): string {
-  if (!fac) return '';
+// Compact metadata row that sits directly under the hero image.
+//
+// Left: "Corporate HQ · 140 ha". Right: the "Site details" toggle and, for the
+// primary panel, the compare control. Everything that used to be stacked below
+// the hero as separate grey paragraphs — the four profile fields, the capture
+// date, the "shows scale and site type" line and the imagery caption — now
+// lives in the one drawer this row opens. Those lines are provenance, not
+// primary content, but they are never deleted and always reachable: the
+// toggle renders whenever the drawer has anything in it.
+//
+// The provider ATTRIBUTION is deliberately NOT in the drawer. It is a licence
+// requirement and stays visible at all times.
+interface MetaRowOptions {
+  drawerId?: string;
+  // Extra provenance to fold into the drawer (primary panel only).
+  provenance?: string[];
+  // Render the compare control in this row (primary panel only).
+  compareControl?: string;
+}
 
-  const hasType = !!fac.siteType;
-  const hasFootprint = typeof fac.footprintHa === 'number' && !isNaN(fac.footprintHa);
-  const hasMore = !!(fac.scaleNote || fac.measuredOn);
+function renderFacilityMetaRow(
+  fac: Facility | FacilityEntry | null | undefined,
+  options: MetaRowOptions = {}
+): string {
+  const drawerId = options.drawerId || 'profile-details-drawer';
+  const provenance = options.provenance || [];
+  const compareControl = options.compareControl || '';
 
-  if (!hasType && !hasFootprint && !hasMore) return '';
+  const hasType = !!fac?.siteType;
+  const hasFootprint = typeof fac?.footprintHa === 'number' && !isNaN(fac.footprintHa as number);
 
-  const cols: string[] = [];
-
-  if (fac.siteType) {
-    cols.push(`
+  const fields: string[] = [];
+  if (fac?.siteType) {
+    fields.push(`
       <div>
         <span class="profile-field-label">Site type</span>
-        <span class="profile-field-value">${fac.siteType}</span>
+        <span class="profile-field-value">${esc(fac.siteType)}</span>
       </div>
     `);
   }
-
-  if (typeof fac.footprintHa === 'number' && !isNaN(fac.footprintHa)) {
-    cols.push(`
+  if (typeof fac?.footprintHa === 'number' && !isNaN(fac.footprintHa)) {
+    fields.push(`
       <div>
         <span class="profile-field-label">Footprint</span>
-        <span class="profile-field-value">${fac.footprintHa} ha</span>
+        <span class="profile-field-value">${esc(fac.footprintHa)} ha</span>
       </div>
     `);
   }
-
-  if (fac.scaleNote) {
-    cols.push(`
+  if (fac?.scaleNote) {
+    fields.push(`
       <div>
         <span class="profile-field-label">Scale context</span>
-        <span class="profile-field-value">${fac.scaleNote}</span>
+        <span class="profile-field-value">${esc(fac.scaleNote)}</span>
+      </div>
+    `);
+  }
+  if (fac?.measuredOn) {
+    fields.push(`
+      <div>
+        <span class="profile-field-label">Provenance</span>
+        <span class="profile-field-value profile-field-quiet">Measured by hand from basemap imagery, ${esc(fac.measuredOn)}</span>
       </div>
     `);
   }
 
-  if (fac.measuredOn) {
-    cols.push(`
-      <div>
-        <span class="profile-field-label">Provenance</span>
-        <span class="profile-field-value" style="color: var(--slate); font-size: 0.72rem;">Measured by hand from basemap imagery, ${fac.measuredOn}</span>
-      </div>
-    `);
-  }
+  const hasDrawer = fields.length > 0 || provenance.length > 0;
+
+  // Nothing to show and nothing to control: render nothing at all.
+  if (!hasDrawer && !compareControl && !hasType && !hasFootprint) return '';
 
   const isExpanded = expansionState.profile;
 
   return `
-    <div class="site-profile-wrapper">
-      <div class="profile-strip-collapsed">
-        <div class="profile-collapsed-summary">
-          ${fac.siteType ? `<span class="profile-summary-type">${fac.siteType}</span>` : ''}
+    <div class="facility-meta-wrapper">
+      <div class="facility-meta-row">
+        <div class="facility-meta-summary">
+          ${fac?.siteType ? `<span class="profile-summary-type">${esc(fac.siteType)}</span>` : ''}
           ${hasType && hasFootprint ? `<span class="profile-summary-sep">·</span>` : ''}
-          ${hasFootprint ? `<span class="profile-summary-ha">${fac.footprintHa} ha</span>` : ''}
+          ${hasFootprint ? `<span class="profile-summary-ha">${esc(fac?.footprintHa)} ha</span>` : ''}
         </div>
-        ${
-          hasMore
-            ? `
-          <button
-            type="button"
-            class="quiet-toggle-btn toggle-profile-btn"
-            data-target="${drawerId}"
-            aria-expanded="${isExpanded ? 'true' : 'false'}"
-          >
-            ${isExpanded ? 'Hide details' : 'Site details'}
-          </button>
-        `
-            : ''
-        }
+        <div class="facility-meta-controls">
+          ${
+            hasDrawer
+              ? `
+            <button
+              type="button"
+              class="quiet-toggle-btn toggle-profile-btn"
+              data-target="${esc(drawerId)}"
+              aria-expanded="${isExpanded ? 'true' : 'false'}"
+              aria-controls="${esc(drawerId)}"
+            >
+              ${isExpanded ? 'Hide details' : 'Site details'}
+            </button>
+          `
+              : ''
+          }
+          ${compareControl}
+        </div>
       </div>
       ${
-        hasMore
+        hasDrawer
           ? `
-        <div class="profile-details-drawer ${isExpanded ? 'is-expanded' : 'is-collapsed'}" id="${drawerId}">
-          <div class="site-profile-strip">
-            ${cols.join('')}
-          </div>
+        <div class="profile-details-drawer ${isExpanded ? 'is-expanded' : 'is-collapsed'}" id="${esc(drawerId)}">
+          ${fields.length > 0 ? `<div class="site-profile-strip">${fields.join('')}</div>` : ''}
+          ${provenance.map((line) => `<p class="provenance-line">${line}</p>`).join('')}
         </div>
       `
           : ''
@@ -535,6 +617,244 @@ function computeRatioLine(
     const ratio = (cHa / pHa).toFixed(1);
     return `${cClean} primary site is roughly ${ratio}x the footprint of ${pClean}.`;
   }
+}
+
+// --- Synthesis -----------------------------------------------------------
+//
+// Arithmetic over values this page has already fetched and displayed. No API
+// call, no model call, no inference. Each line states what a number IS; none
+// states what it means, predicts, or recommends.
+//
+// Guardrail: a panel that is loading, empty, refused, unreachable or
+// rate-limited contributes NO section at all. Nothing here substitutes a
+// default or a placeholder for a figure we do not have.
+
+interface SynthesisGroup {
+  label: string;
+  lines: string[];
+}
+
+// Figures are wrapped so they can be set in tabular-nums.
+function fig(value: string | number): string {
+  return `<span class="syn-figure">${esc(String(value))}</span>`;
+}
+
+function ordinal(n: number): string {
+  const rem100 = n % 100;
+  if (rem100 >= 11 && rem100 <= 13) return `${n}th`;
+  switch (n % 10) {
+    case 1: return `${n}st`;
+    case 2: return `${n}nd`;
+    case 3: return `${n}rd`;
+    default: return `${n}th`;
+  }
+}
+
+// Daily simple returns across the series.
+function dailyReturns(closes: number[]): number[] {
+  const returns: number[] = [];
+  for (let i = 1; i < closes.length; i++) {
+    if (closes[i - 1] > 0) returns.push(closes[i] / closes[i - 1] - 1);
+  }
+  return returns;
+}
+
+function priceSynthesisGroup(): SynthesisGroup | null {
+  // Only a fully resolved price panel contributes. A stale/rate-limited panel
+  // carries figures we cannot date confidently, so it is omitted entirely.
+  if (state.priceState !== 'loaded') return null;
+  const prices = state.priceData?.prices;
+  if (!prices || prices.length < 2) return null;
+
+  const closes = prices.map((p) => p.close);
+  const min = Math.min(...closes);
+  const max = Math.max(...closes);
+  const last = closes[closes.length - 1];
+  const lines: string[] = [];
+
+  // Position of the last close within the window's range.
+  if (max > min) {
+    const pct = ((last - min) / (max - min)) * 100;
+    const position =
+      pct <= 50
+        ? `bottom ${fig(`${Math.round(pct)}%`)}`
+        : `top ${fig(`${Math.round(100 - pct)}%`)}`;
+    lines.push(
+      `Closed at ${fig(`$${last.toFixed(2)}`)}, in the ${position} of its ${fig(prices.length)}-day range.`
+    );
+  }
+
+  // Maximum peak-to-trough decline over the window.
+  let runningPeak = closes[0];
+  let runningPeakIdx = 0;
+  let worst = 0;
+  let worstPeakIdx = 0;
+  let worstTroughIdx = 0;
+  for (let i = 1; i < closes.length; i++) {
+    if (closes[i] > runningPeak) {
+      runningPeak = closes[i];
+      runningPeakIdx = i;
+    }
+    const decline = (closes[i] - runningPeak) / runningPeak;
+    if (decline < worst) {
+      worst = decline;
+      worstPeakIdx = runningPeakIdx;
+      worstTroughIdx = i;
+    }
+  }
+  if (worst < 0) {
+    lines.push(
+      `Maximum drawdown of ${fig(`${(Math.abs(worst) * 100).toFixed(1)}%`)}, from ${fig(formatDate(prices[worstPeakIdx].date))} to ${fig(formatDate(prices[worstTroughIdx].date))}.`
+    );
+  }
+
+  const returns = dailyReturns(closes);
+  if (returns.length > 1) {
+    const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+    const variance =
+      returns.reduce((acc, r) => acc + (r - mean) ** 2, 0) / (returns.length - 1);
+    const annualised = Math.sqrt(variance) * Math.sqrt(252) * 100;
+    lines.push(
+      `Realised volatility of ${fig(`${annualised.toFixed(1)}%`)}, annualised from ${fig(returns.length)} daily returns.`
+    );
+  }
+
+  if (returns.length > 0) {
+    const up = returns.filter((r) => r > 0).length;
+    const down = returns.filter((r) => r < 0).length;
+    lines.push(`${fig(up)} up days, ${fig(down)} down days.`);
+  }
+
+  return lines.length > 0 ? { label: 'Price', lines } : null;
+}
+
+function coverageSynthesisGroup(): SynthesisGroup | null {
+  if (state.newsState !== 'loaded' || state.newsItems.length === 0) return null;
+
+  const now = Date.now();
+  const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
+  const total = state.newsItems.length;
+  const sectionCounts: Record<string, number> = {};
+  let recent = 0;
+  let older = 0;
+  let newestMs: number | null = null;
+
+  for (const item of state.newsItems) {
+    const t = new Date(item.date).getTime();
+    if (!Number.isNaN(t)) {
+      if (now - t <= NINETY_DAYS_MS) recent++;
+      else older++;
+      if (newestMs === null || t > newestMs) newestMs = t;
+    }
+    if (item.section) {
+      sectionCounts[item.section] = (sectionCounts[item.section] || 0) + 1;
+    }
+  }
+
+  const lines: string[] = [];
+  if (recent + older > 0) {
+    lines.push(
+      `${fig(recent)} of ${fig(total)} results published in the last 90 days, ${fig(older)} older.`
+    );
+  }
+
+  let topSection = '';
+  let topCount = 0;
+  for (const [section, count] of Object.entries(sectionCounts)) {
+    if (count > topCount) {
+      topCount = count;
+      topSection = section;
+    }
+  }
+  if (topSection) {
+    lines.push(
+      `Most frequent section is ${esc(topSection)}, ${fig(topCount)} of ${fig(total)} results.`
+    );
+  }
+
+  if (newestMs !== null) {
+    const days = Math.max(0, Math.floor((now - newestMs) / (24 * 60 * 60 * 1000)));
+    lines.push(
+      days === 1
+        ? `Most recent article is ${fig(1)} day old.`
+        : `Most recent article is ${fig(days)} days old.`
+    );
+  }
+
+  return lines.length > 0 ? { label: 'Coverage', lines } : null;
+}
+
+function siteSynthesisGroup(): SynthesisGroup | null {
+  // Footprint only. Nothing about the imagery itself belongs in a synthesis.
+  if (state.satelliteState !== 'loaded') return null;
+
+  const symbol = state.selectedCompany?.symbol;
+  if (!symbol) return null;
+  const footprint = state.selectedCompany?.facility?.footprintHa ?? FACILITIES[symbol]?.footprintHa;
+  if (typeof footprint !== 'number' || !Number.isFinite(footprint)) return null;
+
+  const mapped = Object.values(FACILITIES).filter(
+    (f) => typeof f.footprintHa === 'number' && Number.isFinite(f.footprintHa)
+  );
+  if (mapped.length === 0) return null;
+
+  const ranked = [...mapped].sort((a, b) => (b.footprintHa as number) - (a.footprintHa as number));
+  const rank = ranked.findIndex((f) => f.symbol === symbol) + 1;
+  if (rank === 0) return null;
+
+  return {
+    label: 'Site',
+    lines: [
+      `${fig(ordinal(rank))} largest of ${fig(mapped.length)} mapped sites by footprint, at ${fig(`${footprint} ha`)}.`
+    ]
+  };
+}
+
+function renderSynthesisSection(): string {
+  const isOpen = expansionState.synthesis;
+  const groups = [priceSynthesisGroup(), coverageSynthesisGroup(), siteSynthesisGroup()].filter(
+    (g): g is SynthesisGroup => g !== null
+  );
+
+  const body =
+    groups.length === 0
+      ? `<p class="synthesis-pending">No panel has resolved figures to compute from yet.</p>`
+      : `
+        <div class="synthesis-column">
+          ${groups
+            .map(
+              (group) => `
+            <div class="synthesis-group">
+              <span class="synthesis-group-label">${esc(group.label)}</span>
+              ${group.lines.map((line) => `<p class="synthesis-line">${line}</p>`).join('')}
+            </div>
+          `
+            )
+            .join('')}
+        </div>
+        <p class="synthesis-note">Computed from the data on this page. No inference, no external model.</p>
+      `;
+
+  return `
+    <section class="synthesis-section">
+      <button
+        type="button"
+        id="synthesize-btn"
+        class="synthesize-btn"
+        aria-expanded="${isOpen ? 'true' : 'false'}"
+        aria-controls="synthesis-output"
+      >
+        Synthesize
+      </button>
+      <div
+        id="synthesis-output"
+        class="synthesis-output ${isOpen ? 'is-expanded' : 'is-collapsed'}"
+        ${isOpen ? '' : 'hidden'}
+      >
+        ${body}
+      </div>
+    </section>
+  `;
 }
 
 // Generate single cross-panel synthesis line above the three panels
@@ -685,6 +1005,71 @@ function render() {
     `;
   };
 
+  // Compare control, previously in the panel header, now in the metadata row
+  // directly under the hero.
+  const compareControl = !expansionState.compareInvoked && !state.compareSymbol
+    ? `
+      <button
+        type="button"
+        id="open-compare-btn"
+        class="quiet-toggle-btn"
+        aria-expanded="false"
+      >
+        Compare with…
+      </button>
+    `
+    : `
+      <select
+        id="compare-facility-select"
+        aria-label="Compare with another company facility"
+        class="compare-select"
+      >
+        <option value="">Select company to compare…</option>
+        ${Object.values(FACILITIES)
+          .filter((f) => f.symbol !== (state.selectedCompany?.symbol || ''))
+          .map(
+            (f) => `
+          <option value="${esc(f.symbol)}" ${state.compareSymbol === f.symbol ? 'selected' : ''}>
+            ${esc(f.symbol)} · ${esc(f.name)}
+          </option>
+        `
+          )
+          .join('')}
+      </select>
+      <button
+        type="button"
+        id="exit-compare-btn"
+        class="compare-exit-btn"
+        title="Exit compare mode"
+      >
+        ${state.compareSymbol ? 'Exit' : 'Cancel'}
+      </button>
+    `;
+
+  // Provenance folded into the "Site details" drawer: the capture date when we
+  // have one, the scale/activity disclaimer, and the imagery caption. All three
+  // are verbatim; only their placement changed.
+  const satelliteSources = activeSatelliteSources();
+  const captionText =
+    satelliteSources.length === 0
+      ? CAPTION_LANDSAT
+      : satelliteSources.map((src) => (src === 'esri' ? CAPTION_ESRI : CAPTION_LANDSAT)).join(' ');
+  const attributionText =
+    satelliteSources.length === 0
+      ? ATTRIBUTION_LANDSAT
+      : satelliteSources
+          .map((src) => (src === 'esri' ? ATTRIBUTION_ESRI : ATTRIBUTION_LANDSAT))
+          .join(' · ');
+
+  const satelliteProvenance: string[] = [];
+  if (state.satelliteSource === 'landsat' && state.satelliteCaptureDate) {
+    satelliteProvenance.push(`Captured: ${esc(state.satelliteCaptureDate)}`);
+  }
+  satelliteProvenance.push(
+    'This panel shows scale and site type. It does not show activity. Measuring change would need dated, repeat imagery from a commercial provider — the input we don\'t have.'
+  );
+  satelliteProvenance.push(captionText);
+
   root.innerHTML = `
     <div class="app-container ${state.deviceMode === 'mobile' ? 'device-mode-mobile' : ''}">
 
@@ -825,57 +1210,11 @@ function render() {
               }
             </div>
 
-            <div class="flex items-center gap-4 flex-wrap">
-              <!-- Three Provider Status Chips -->
-              <div class="status-chips-group">
-                ${getStatusChip('satellite', 'Satellite')}
-                ${getStatusChip('news', 'News')}
-                ${getStatusChip('price', 'Price')}
-              </div>
-
-              <!-- Compare with... control (invoked on demand) -->
-              <div class="flex items-center gap-2">
-                ${
-                  !expansionState.compareInvoked && !state.compareSymbol
-                    ? `
-                  <button
-                    type="button"
-                    id="open-compare-btn"
-                    class="quiet-toggle-btn"
-                    aria-expanded="false"
-                  >
-                    Compare with…
-                  </button>
-                `
-                    : `
-                  <select
-                    id="compare-facility-select"
-                    aria-label="Compare with another company facility"
-                    class="compare-select"
-                  >
-                    <option value="">Select company to compare…</option>
-                    ${Object.values(FACILITIES)
-                      .filter((f) => f.symbol !== (state.selectedCompany?.symbol || ''))
-                      .map(
-                        (f) => `
-                      <option value="${f.symbol}" ${state.compareSymbol === f.symbol ? 'selected' : ''}>
-                        ${f.symbol} · ${f.name}
-                      </option>
-                    `
-                      )
-                      .join('')}
-                  </select>
-                  <button
-                    type="button"
-                    id="exit-compare-btn"
-                    class="compare-exit-btn"
-                    title="Exit compare mode"
-                  >
-                    ${state.compareSymbol ? 'Exit' : 'Cancel'}
-                  </button>
-                `
-                }
-              </div>
+            <!-- Three Provider Status Chips -->
+            <div class="status-chips-group">
+              ${getStatusChip('satellite', 'Satellite')}
+              ${getStatusChip('news', 'News')}
+              ${getStatusChip('price', 'Price')}
             </div>
           </div>
 
@@ -909,7 +1248,7 @@ function render() {
                     <div class="hero-facility-label" style="font-size: 0.72rem; margin-top: 0.2rem;">${esc(facilityLabel)}</div>
                   </div>
                 </div>
-                ${renderProfileStrip(comp?.facility, 'profile-details-primary')}
+                ${renderFacilityMetaRow(comp?.facility, { drawerId: 'profile-details-primary', provenance: satelliteProvenance, compareControl })}
               </div>
 
               <!-- Compared Company -->
@@ -926,7 +1265,7 @@ function render() {
                     <div class="hero-facility-label" style="font-size: 0.72rem; margin-top: 0.2rem;">${FACILITIES[state.compareSymbol].label}</div>
                   </div>
                 </div>
-                ${renderProfileStrip(FACILITIES[state.compareSymbol], 'profile-details-compare')}
+                ${renderFacilityMetaRow(FACILITIES[state.compareSymbol], { drawerId: 'profile-details-compare' })}
               </div>
             </div>
 
@@ -974,8 +1313,8 @@ function render() {
                 : `<div class="panel-failed-line">Can't reach satellite imagery service. ${facilityLabel ? '' : 'Service proxy unavailable from upstream endpoints.'}</div>`
             }
 
-            <!-- Profile Strip directly under collapsed line if facility data exists -->
-            ${renderProfileStrip(comp?.facility)}
+            <!-- Metadata row under the collapsed line -->
+            ${renderFacilityMetaRow(comp?.facility, { provenance: satelliteProvenance, compareControl })}
           `
               : `
             <!-- SINGLE MODE: Hero with overlaid text on lower left -->
@@ -1009,47 +1348,17 @@ function render() {
               }
             </div>
 
-            ${
-              state.satelliteSource === 'landsat' && state.satelliteCaptureDate
-                ? `
-              <div style="margin-top: 0.4rem; font-size: 0.72rem; color: var(--slate); font-family: var(--font-mono);">
-                Captured: ${state.satelliteCaptureDate}
-              </div>
-            `
-                : ''
-            }
-
-            <!-- Profile Strip directly under image -->
-            ${renderProfileStrip(comp?.facility)}
+            <!-- Compact metadata row directly under the hero. Capture date,
+                 disclaimer and caption are folded into its drawer. -->
+            ${renderFacilityMetaRow(comp?.facility, { provenance: satelliteProvenance, compareControl })}
           `
           }
-
-          <!-- Disclaimer directly below profile strip and above caption -->
-          <p style="margin-top: 0.75rem; font-size: 0.72rem; color: var(--slate); line-height: 1.4;">
-            This panel shows scale and site type. It does not show activity. Measuring change would need dated, repeat imagery from a commercial provider — the input we don't have.
-          </p>
         </div>
 
-        <!-- Fixed Caption, ALWAYS VISIBLE with bottom-right attribution -->
-        <div class="panel-bottom-bar">
-          <p style="margin: 0; font-size: 0.72rem; color: var(--slate); line-height: 1.4; max-width: 65ch;">
-            ${(() => {
-              const sources = activeSatelliteSources();
-              if (sources.length === 0) return CAPTION_LANDSAT;
-              return sources
-                .map((src) => (src === 'esri' ? CAPTION_ESRI : CAPTION_LANDSAT))
-                .join(' ');
-            })()}
-          </p>
-          <span class="panel-attribution">
-            ${(() => {
-              const sources = activeSatelliteSources();
-              if (sources.length === 0) return ATTRIBUTION_LANDSAT;
-              return sources
-                .map((src) => (src === 'esri' ? ATTRIBUTION_ESRI : ATTRIBUTION_LANDSAT))
-                .join(' · ');
-            })()}
-          </span>
+        <!-- Attribution is a licence requirement: always visible, never behind
+             the Site details toggle. -->
+        <div class="panel-bottom-bar panel-bottom-bar--attribution-only">
+          <span class="panel-attribution">${attributionText}</span>
         </div>
       </section>
 
@@ -1064,6 +1373,26 @@ function render() {
           <div>
             <div class="panel-header-bar">
               <h2 class="panel-heading">Ninety-day close</h2>
+              ${
+                state.priceData?.prices && state.priceData.prices.length > 1
+                  ? `
+                <div class="chart-period-toggle" role="group" aria-label="Chart period">
+                  ${[30, 90]
+                    .map(
+                      (days) => `
+                    <button
+                      type="button"
+                      class="chart-period-btn ${state.chartPeriod === days ? 'is-active' : ''}"
+                      data-period="${days}"
+                      aria-pressed="${state.chartPeriod === days ? 'true' : 'false'}"
+                    >${days}d</button>
+                  `
+                    )
+                    .join('')}
+                </div>
+              `
+                  : ''
+              }
             </div>
 
             ${(() => {
@@ -1100,9 +1429,13 @@ function render() {
                 `;
               }
 
-              // Loaded (or rate-limited serving stale cache)
-              const prices = state.priceData?.prices || [];
+              // Loaded (or rate-limited serving stale cache).
+              // The period toggle re-slices THIS array — the full series is
+              // already here, so switching 30d/90d never refetches.
+              const fullSeries = state.priceData?.prices || [];
+              const prices = fullSeries.slice(-state.chartPeriod);
               if (prices.length > 0) {
+                const latest = prices[prices.length - 1];
                 return `
                   ${
                     state.priceData?.stale || state.priceState === 'rate-limited'
@@ -1113,6 +1446,13 @@ function render() {
                   `
                       : ''
                   }
+
+                  <!-- Readout for the hovered / focused point. Defaults to the
+                       latest close so the row never shifts the layout. -->
+                  <div id="chart-readout" class="chart-readout" aria-live="polite">
+                    <span id="chart-readout-date" class="chart-readout-date">${esc(formatDate(latest.date))}</span>
+                    <span id="chart-readout-close" class="chart-readout-close">$${latest.close.toFixed(2)}</span>
+                  </div>
 
                   <!-- Inline SVG Chart -->
                   <div class="price-chart-wrap">
@@ -1228,6 +1568,9 @@ function render() {
 
       </div>
 
+      <!-- SYNTHESIZE · computed from data already on screen -->
+      ${renderSynthesisSection()}
+
       <!-- FOOTER -->
       <footer class="site-footer">
         <p class="footer-disclaimer">
@@ -1250,6 +1593,94 @@ function render() {
   `;
 
   attachEventListeners();
+}
+
+// --- Price chart interaction (no charting library) ------------------------
+//
+// The crosshair is driven by direct DOM writes rather than a re-render, so
+// hovering never rebuilds the page and never loses pointer focus.
+let activeChartIndex = 0;
+
+function readoutFor(point: PricePoint): void {
+  const dateEl = document.getElementById('chart-readout-date');
+  const closeEl = document.getElementById('chart-readout-close');
+  if (dateEl) dateEl.textContent = formatDate(point.date);
+  if (closeEl) closeEl.textContent = `$${point.close.toFixed(2)}`;
+}
+
+function updateCrosshair(index: number): void {
+  const g = chartGeom;
+  if (!g || g.points.length === 0) return;
+
+  const i = Math.max(0, Math.min(g.points.length - 1, index));
+  const point = g.points[i];
+  const group = document.getElementById('chart-crosshair');
+  const line = document.getElementById('chart-crosshair-line');
+  const dot = document.getElementById('chart-crosshair-dot');
+  if (!group || !line || !dot) return;
+
+  const x = chartX(g, i);
+  const y = chartY(g, point.close);
+  line.setAttribute('x1', x.toFixed(1));
+  line.setAttribute('x2', x.toFixed(1));
+  dot.setAttribute('cx', x.toFixed(1));
+  dot.setAttribute('cy', y.toFixed(1));
+  group.setAttribute('visibility', 'visible');
+
+  readoutFor(point);
+  activeChartIndex = i;
+}
+
+function hideCrosshair(): void {
+  const group = document.getElementById('chart-crosshair');
+  if (group) group.setAttribute('visibility', 'hidden');
+
+  const g = chartGeom;
+  if (!g || g.points.length === 0) return;
+  // Fall back to the latest close so the readout row keeps its height.
+  activeChartIndex = g.points.length - 1;
+  readoutFor(g.points[activeChartIndex]);
+}
+
+// preserveAspectRatio="none" means viewBox x maps linearly across the
+// rendered width, so a plain proportional inversion is exact.
+function indexFromClientX(svg: SVGSVGElement, clientX: number): number {
+  const g = chartGeom;
+  if (!g || g.points.length < 2) return 0;
+  const rect = svg.getBoundingClientRect();
+  if (rect.width === 0) return 0;
+  const viewBoxX = ((clientX - rect.left) / rect.width) * g.width;
+  const ratio = (viewBoxX - g.padLeft) / g.chartW;
+  return Math.round(ratio * (g.points.length - 1));
+}
+
+function attachChartInteraction(): void {
+  const svg = document.getElementById('price-chart') as unknown as SVGSVGElement | null;
+  if (!svg || !chartGeom || chartGeom.points.length === 0) return;
+
+  activeChartIndex = chartGeom.points.length - 1;
+
+  svg.addEventListener('mousemove', (e) => {
+    updateCrosshair(indexFromClientX(svg, (e as MouseEvent).clientX));
+  });
+  svg.addEventListener('mouseleave', hideCrosshair);
+  svg.addEventListener('focus', () => updateCrosshair(activeChartIndex));
+  svg.addEventListener('blur', hideCrosshair);
+  svg.addEventListener('keydown', (e) => {
+    const ev = e as KeyboardEvent;
+    const count = chartGeom?.points.length ?? 0;
+    if (count === 0) return;
+
+    let next = activeChartIndex;
+    if (ev.key === 'ArrowLeft') next = activeChartIndex - 1;
+    else if (ev.key === 'ArrowRight') next = activeChartIndex + 1;
+    else if (ev.key === 'Home') next = 0;
+    else if (ev.key === 'End') next = count - 1;
+    else return;
+
+    ev.preventDefault();
+    updateCrosshair(next);
+  });
 }
 
 // Event Listeners
@@ -1367,6 +1798,29 @@ function attachEventListeners() {
     };
   });
 
+  // Chart period toggles. These re-slice data already in state.priceData —
+  // they must never call fetchPrices(), because Alpha Vantage would reject the
+  // extra request and the panel would drop to its rate-limited state.
+  const periodBtns = document.querySelectorAll('.chart-period-btn');
+  periodBtns.forEach((btn) => {
+    (btn as HTMLElement).onclick = () => {
+      const days = Number(btn.getAttribute('data-period'));
+      if (days !== 30 && days !== 90) return;
+      if (state.chartPeriod === days) return;
+      state.chartPeriod = days;
+      render();
+    };
+  });
+
+  // Synthesize toggle
+  const synthBtn = document.getElementById('synthesize-btn');
+  if (synthBtn) {
+    synthBtn.onclick = () => {
+      expansionState.synthesis = !expansionState.synthesis;
+      render();
+    };
+  }
+
   // Pick list clicks
   const resultRows = document.querySelectorAll('.search-result-row');
   resultRows.forEach((row) => {
@@ -1401,6 +1855,8 @@ function attachEventListeners() {
       }
     };
   });
+
+  attachChartInteraction();
 }
 
 // Perform Company Search via api/company.js
@@ -1473,6 +1929,8 @@ function selectCompany(company: CompanyMatch) {
   expansionState.news = false;
   expansionState.profile = false;
   expansionState.compareInvoked = false;
+  expansionState.synthesis = false;
+  state.chartPeriod = 90;
 
   // Merge facility with hand-entered FACILITIES entry if available
   const known = FACILITIES[company.symbol];

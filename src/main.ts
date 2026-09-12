@@ -86,6 +86,16 @@ interface State {
   // Full-screen chart. The price panel itself becomes the overlay, so there is
   // only ever one chart in the DOM and no duplicated element ids.
   chartFullscreen: boolean;
+  // Newsletter signup. Its own four states, deliberately separate from any
+  // data panel: a form failure is not a provider outage and must not read
+  // like one.
+  signupState: 'idle' | 'submitting' | 'sent' | 'rejected' | 'unreachable';
+  signupName: string;
+  signupEmail: string;
+  signupEmailError: string | null;
+  // Ticker captured at submit time, so the confirmation keeps naming the
+  // company that was actually tracked.
+  signupTrackedTicker: string | null;
 }
 
 const state: State = {
@@ -113,7 +123,12 @@ const state: State = {
   health: null,
   deviceMode: 'desktop',
   chartPeriod: 90,
-  chartFullscreen: false
+  chartFullscreen: false,
+  signupState: 'idle',
+  signupName: '',
+  signupEmail: '',
+  signupEmailError: null,
+  signupTrackedTicker: null
 };
 
 // UI Expansion state (per-session, resets on lookup)
@@ -680,6 +695,83 @@ function renderRatioLine(ratio: RatioLine | null): string {
   `;
 }
 
+// --- Newsletter signup (Web3Forms) ---------------------------------------
+
+// WEB3FORMS_KEY is the one credential in this project that lives in browser code.
+// It can do exactly one thing: post a message to one inbox. It cannot read anything,
+// cannot be used against another account, and exposing it costs us nothing beyond
+// spam to our own address. Every other key here is server-side because every other
+// key can do more than one thing. Do not generalise from this.
+const WEB3FORMS_KEY =
+  (import.meta as unknown as { env?: Record<string, string | undefined> }).env
+    ?.VITE_WEB3FORMS_KEY ?? '';
+
+const WEB3FORMS_ENDPOINT = 'https://api.web3forms.com/submit';
+
+function isValidEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
+async function submitSignup(): Promise<void> {
+  const company = state.selectedCompany;
+  if (!company || state.signupState === 'submitting') return;
+
+  const email = state.signupEmail.trim();
+
+  // Validate here rather than posting a bad address and letting the service
+  // reject it — that would surface as "rejected", which blames the wrong party.
+  if (!isValidEmail(email)) {
+    state.signupEmailError = "That doesn't look like an email address";
+    render();
+    (document.getElementById('signup-email') as HTMLInputElement | null)?.focus();
+    return;
+  }
+
+  state.signupEmailError = null;
+  state.signupState = 'submitting';
+  render();
+
+  try {
+    // The address travels in the POST body only, never in the URL.
+    const response = await fetch(WEB3FORMS_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        access_key: WEB3FORMS_KEY,
+        subject: 'Overberg · new tracker',
+        from_name: 'Overberg',
+        email,
+        name: state.signupName.trim(),
+        message: `Tracking ${company.name} (${company.symbol})`,
+        // Web3Forms passes unrecognised fields straight into the email body,
+        // so these need no configuration at their end.
+        ticker: company.symbol,
+        company: company.name
+      })
+    });
+
+    // Web3Forms answers HTTP 200 carrying {"success": false}. Branch on the
+    // payload, NEVER on response.ok. This is the second place in this codebase
+    // where a success code carries a failure — the first is Alpha Vantage
+    // returning 200 with an "Information" key (see api/prices.js) — and both
+    // are checked the same way.
+    const data = await response.json().catch(() => null);
+
+    if (data && data.success === true) {
+      state.signupTrackedTicker = company.symbol;
+      state.signupState = 'sent';
+    } else {
+      // We reached the service and it declined. That is not an outage.
+      state.signupState = 'rejected';
+    }
+  } catch {
+    // The request never completed.
+    state.signupState = 'unreachable';
+  }
+
+  render();
+}
+
 // --- Synthesis -----------------------------------------------------------
 //
 // Arithmetic over values this page has already fetched and displayed. No API
@@ -931,6 +1023,107 @@ function renderSynthesisRow(row: SynthesisRow): string {
       <span class="synthesis-figure ${toneClass}">${row.figureIsHtml ? row.figure : esc(row.figure)}</span>
       <span class="synthesis-row-label">${esc(row.label)}</span>
     </div>
+  `;
+}
+
+function renderSignupSection(): string {
+  const company = state.selectedCompany;
+  const hasCompany = !!company;
+  const ticker = company ? company.symbol : '';
+  const buttonLabel = ticker ? `Track ${esc(ticker)}` : 'Track';
+  const isSubmitting = state.signupState === 'submitting';
+  const disabled = !hasCompany || isSubmitting;
+
+  // Sent collapses the whole form to the confirmation line.
+  if (state.signupState === 'sent') {
+    return `
+      <section class="signup-section" aria-labelledby="signup-heading">
+        <h2 class="signup-heading" id="signup-heading">Track this company</h2>
+        <p class="signup-status signup-status--sent" role="status" aria-live="polite">
+          Tracking ${esc(state.signupTrackedTicker || ticker)}. Check your inbox to confirm.
+        </p>
+        <p class="signup-honesty">
+          Signups are collected but the digest isn't running yet. This form demonstrates the capture step only.
+        </p>
+      </section>
+    `;
+  }
+
+  // One status line, driven by the submitting / rejected / unreachable states.
+  // These sentences are the signup's own — a form failure is not a data-panel
+  // outage and must not borrow a panel's wording.
+  let statusLine = '';
+  if (isSubmitting) {
+    statusLine = 'Sending…';
+  } else if (state.signupState === 'rejected') {
+    statusLine = "That didn't go through. The form service rejected the request.";
+  } else if (state.signupState === 'unreachable') {
+    statusLine = "Can't reach the form service. Try again in a moment.";
+  }
+
+  const statusClass =
+    state.signupState === 'rejected' || state.signupState === 'unreachable'
+      ? 'signup-status signup-status--fail'
+      : 'signup-status';
+
+  return `
+    <section class="signup-section" aria-labelledby="signup-heading">
+      <h2 class="signup-heading" id="signup-heading">Track this company</h2>
+      ${
+        hasCompany
+          ? `<p class="signup-sub">We'll email you when there's new Guardian coverage of ${esc(company!.name)}. One message a week at most.</p>`
+          : `<p class="signup-sub">Pick a company first.</p>`
+      }
+
+      <form id="signup-form" class="signup-form" novalidate>
+        <div class="signup-field">
+          <label class="signup-label" for="signup-name">Name <span class="signup-optional">(optional)</span></label>
+          <input
+            id="signup-name"
+            name="name"
+            type="text"
+            autocomplete="name"
+            class="signup-input"
+            value="${esc(state.signupName)}"
+            ${disabled ? 'disabled' : ''}
+          />
+        </div>
+
+        <div class="signup-field">
+          <label class="signup-label" for="signup-email">Email</label>
+          <input
+            id="signup-email"
+            name="email"
+            type="email"
+            required
+            autocomplete="email"
+            class="signup-input ${state.signupEmailError ? 'has-error' : ''}"
+            value="${esc(state.signupEmail)}"
+            aria-invalid="${state.signupEmailError ? 'true' : 'false'}"
+            ${state.signupEmailError ? 'aria-describedby="signup-email-error"' : ''}
+            ${disabled ? 'disabled' : ''}
+          />
+          ${
+            state.signupEmailError
+              ? `<span class="signup-error" id="signup-email-error">${esc(state.signupEmailError)}</span>`
+              : ''
+          }
+        </div>
+
+        <button
+          type="submit"
+          id="signup-submit"
+          class="signup-btn"
+          ${disabled ? 'disabled' : ''}
+        >${buttonLabel}</button>
+      </form>
+
+      <p class="${statusClass}" role="status" aria-live="polite">${esc(statusLine)}</p>
+
+      <p class="signup-honesty">
+        Signups are collected but the digest isn't running yet. This form demonstrates the capture step only.
+      </p>
+    </section>
   `;
 }
 
@@ -1703,29 +1896,11 @@ function render() {
 
       </div>
 
-      <!-- MOCKUP AD SLOT
-           Deliberately inert: pure markup and CSS, no ad tag, no script, no
-           third-party request, no tracking pixel. The dimension label is
-           swapped by media query rather than JS so there is no resize
-           listener either. The note beneath it is part of the unit and is
-           never collapsed — a placeholder without the explanation is exactly
-           the thing being avoided. -->
-      <section class="ad-mockup-section" aria-labelledby="ad-mockup-label">
-        <div class="ad-mockup-slot">
-          <span class="ad-mockup-kicker" id="ad-mockup-label">Mockup ad slot</span>
-          <span class="ad-mockup-dims">
-            <span class="ad-dims-wide">728 × 90 leaderboard</span>
-            <span class="ad-dims-narrow">320 × 100 mobile banner</span>
-          </span>
-          <span class="ad-mockup-sub">Not a live ad unit. See note below.</span>
-        </div>
-        <p class="ad-mockup-note">
-          This slot is a mockup and will stay empty. Overberg cannot carry advertising in its current form: the Guardian developer key is registered non-commercial, Alpha Vantage's free tier is evaluation-only, and Esri's free basemap terms do not cover ad-supported sites. Filling this slot would require a Guardian commercial licence, an Alpha Vantage paid plan, and an ArcGIS Location Platform subscription or a differently-licensed imagery provider.
-        </p>
-      </section>
-
       <!-- SYNTHESIZE · computed from data already on screen -->
       ${renderSynthesisSection()}
+
+      <!-- NEWSLETTER SIGNUP · posts straight to Web3Forms, not through /api -->
+      ${renderSignupSection()}
 
       <!-- FOOTER -->
       <footer class="site-footer">
@@ -1986,6 +2161,9 @@ function attachEventListeners() {
   document.onkeydown = (e) => {
     if ((e as KeyboardEvent).key === 'Escape' && state.chartFullscreen) {
       state.chartFullscreen = false;
+  state.signupState = 'idle';
+  state.signupEmailError = null;
+  state.signupTrackedTicker = null;
       render();
       document.getElementById('chart-fullscreen-btn')?.focus();
     }
@@ -1994,6 +2172,41 @@ function attachEventListeners() {
   // Stop the page behind the overlay from scrolling.
   if (document.body) {
     document.body.classList.toggle('has-fullscreen-chart', state.chartFullscreen);
+  }
+
+  // Newsletter signup. Field values are mirrored into state on input WITHOUT
+  // re-rendering — render() rebuilds innerHTML, so typing would otherwise be
+  // destroyed on any unrelated re-render, and re-rendering per keystroke would
+  // fight the caret.
+  const signupForm = document.getElementById('signup-form') as HTMLFormElement | null;
+  const signupName = document.getElementById('signup-name') as HTMLInputElement | null;
+  const signupEmail = document.getElementById('signup-email') as HTMLInputElement | null;
+
+  if (signupName) {
+    signupName.oninput = () => {
+      state.signupName = signupName.value;
+    };
+  }
+
+  if (signupEmail) {
+    signupEmail.oninput = () => {
+      state.signupEmail = signupEmail.value;
+    };
+  }
+
+  if (signupForm) {
+    signupForm.onsubmit = (e) => {
+      e.preventDefault();
+      // Read straight off the inputs so a submit never posts a stale value.
+      if (signupName) state.signupName = signupName.value;
+      if (signupEmail) state.signupEmail = signupEmail.value;
+      // A retry should start from a clean status rather than showing the
+      // previous failure underneath "Sending…".
+      if (state.signupState === 'rejected' || state.signupState === 'unreachable') {
+        state.signupState = 'idle';
+      }
+      submitSignup();
+    };
   }
 
   // Synthesize toggle

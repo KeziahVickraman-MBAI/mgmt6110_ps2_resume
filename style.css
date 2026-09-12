@@ -1379,95 +1379,6 @@ body.has-fullscreen-chart {
   }
 }
 
-/* ---------------------------------------------------------------------------
-   MOCKUP AD SLOT
-   A wireframe placeholder, not a designed banner. Dashed outline, no fill, no
-   radius, no colour of its own — the flatness is the point. Nothing here loads
-   or requests anything; it is markup and CSS only.
-   --------------------------------------------------------------------------- */
-
-.ad-mockup-section {
-  margin-top: var(--section-gap);
-}
-
-.ad-mockup-slot {
-  width: 100%;
-  max-width: 728px;
-  height: 90px;
-  margin: 0 auto;
-  border: 1px dashed var(--rule);
-  background: none;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 0.15rem;
-  text-align: center;
-  padding: 0 1rem;
-}
-
-.ad-mockup-kicker {
-  font-size: 0.72rem;
-  color: var(--slate);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  line-height: 1.3;
-}
-
-.ad-mockup-dims {
-  font-size: 0.9rem;
-  color: var(--ink);
-  line-height: 1.3;
-}
-
-.ad-mockup-sub {
-  font-size: 0.75rem;
-  color: var(--slate);
-  line-height: 1.3;
-}
-
-/* Dimension label follows the slot size. Swapped by media query so there is no
-   JS and no resize listener. */
-.ad-dims-narrow {
-  display: none;
-}
-
-.ad-mockup-note {
-  max-width: 65ch;
-  margin: 0.85rem auto 0;
-  font-size: 0.78rem;
-  color: var(--slate);
-  line-height: 1.55;
-}
-
-@media (max-width: 820px) {
-  .ad-mockup-slot {
-    max-width: 320px;
-    height: 100px;
-  }
-  .ad-dims-wide {
-    display: none;
-  }
-  .ad-dims-narrow {
-    display: inline;
-  }
-}
-
-/* The mobile preview toggle is container-width, not viewport-width, so it
-   needs the same swap applied explicitly. */
-.app-container.device-mode-mobile .ad-mockup-slot {
-  max-width: 320px;
-  height: 100px;
-}
-
-.app-container.device-mode-mobile .ad-dims-wide {
-  display: none;
-}
-
-.app-container.device-mode-mobile .ad-dims-narrow {
-  display: inline;
-}
-
 /* Company each lower panel describes. Quieter than the heading it follows, so
    it reads as a qualifier rather than part of the panel name. */
 .panel-heading-ticker {
@@ -1488,4 +1399,152 @@ body.has-fullscreen-chart {
 
 .compare-scope-note + .lower-sections-grid {
   margin-top: 0.85rem;
+}
+
+/* ---------------------------------------------------------------------------
+   NEWSLETTER SIGNUP
+   Real form semantics: every input has a visible label, the status line is a
+   live region, and focus is visible throughout.
+   --------------------------------------------------------------------------- */
+
+.signup-section {
+  margin-top: var(--section-gap);
+  padding-top: calc(var(--section-gap) / 2);
+  border-top: 1px solid var(--rule);
+  max-width: 65ch;
+}
+
+.signup-heading {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0 0 0.35rem;
+}
+
+.signup-sub {
+  margin: 0 0 1rem;
+  font-size: 0.82rem;
+  color: var(--slate);
+  line-height: 1.5;
+}
+
+.signup-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+
+.signup-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+  flex: 1 1 12rem;
+}
+
+.signup-label {
+  font-size: 0.72rem;
+  color: var(--slate);
+}
+
+.signup-optional {
+  color: var(--slate);
+}
+
+.signup-input {
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  padding: 0.4rem 0.55rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.signup-input:focus-visible {
+  outline: 1.5px solid var(--ink);
+  outline-offset: 1px;
+}
+
+.signup-input.has-error {
+  border-color: var(--down);
+}
+
+.signup-input:disabled {
+  background: transparent;
+  color: var(--slate);
+  cursor: not-allowed;
+}
+
+.signup-error {
+  font-size: 0.72rem;
+  color: var(--down);
+  line-height: 1.35;
+}
+
+.signup-btn {
+  background: var(--ink);
+  color: var(--paper);
+  border: 1px solid var(--ink);
+  padding: 0.42rem 0.95rem;
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  font-weight: 500;
+  line-height: 1.35;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.signup-btn:hover:not(:disabled) {
+  background: transparent;
+  color: var(--ink);
+}
+
+.signup-btn:focus-visible {
+  outline: 1.5px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.signup-btn:disabled {
+  background: transparent;
+  color: var(--slate);
+  border-color: var(--rule);
+  cursor: not-allowed;
+}
+
+/* Reserves its line so an appearing status never shifts the layout. */
+.signup-status {
+  margin: 0.7rem 0 0;
+  min-height: 1.1rem;
+  font-size: 0.78rem;
+  color: var(--slate);
+  line-height: 1.4;
+}
+
+.signup-status--fail {
+  color: var(--down);
+}
+
+.signup-status--sent {
+  color: var(--ink);
+  font-size: 0.85rem;
+}
+
+.signup-honesty {
+  margin: 0.6rem 0 0;
+  font-size: 0.75rem;
+  color: var(--slate);
+  line-height: 1.45;
+}
+
+@media (max-width: 560px) {
+  .signup-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .signup-btn {
+    width: 100%;
+  }
 }

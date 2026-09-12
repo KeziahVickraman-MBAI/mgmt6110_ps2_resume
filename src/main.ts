@@ -590,12 +590,22 @@ function toPossessive(name: string): string {
   return name.endsWith('s') ? `${name}'` : `${name}'s`;
 }
 
-// Compute ratio line between two facility footprints
+// Compute the footprint ratio between two facilities.
+//
+// Returned in parts so the multiple can be set larger than the words around
+// it. Both footprints are hand-entered FACILITIES figures — nothing here is
+// derived from imagery.
+interface RatioLine {
+  before: string;
+  multiple: string | null;
+  after: string;
+}
+
 function computeRatioLine(
   primaryName: string,
   primaryFacility: Facility | FacilityEntry | null | undefined,
   compareFacility: FacilityEntry | null | undefined
-): string | null {
+): RatioLine | null {
   if (!primaryFacility || !compareFacility) return null;
   const pHa = primaryFacility.footprintHa;
   const cHa = compareFacility.footprintHa;
@@ -607,37 +617,71 @@ function computeRatioLine(
   const cClean = toPossessive(cleanName(compareFacility.name));
 
   if (Math.abs(pHa - cHa) < 0.05) {
-    return `${pClean} primary site is roughly the same footprint as ${cClean}.`;
+    return {
+      before: `${pClean} primary site is roughly the same footprint as ${cClean}.`,
+      multiple: null,
+      after: ''
+    };
   }
 
   if (pHa >= cHa) {
-    const ratio = (pHa / cHa).toFixed(1);
-    return `${pClean} primary site is roughly ${ratio}x the footprint of ${cClean}.`;
-  } else {
-    const ratio = (cHa / pHa).toFixed(1);
-    return `${cClean} primary site is roughly ${ratio}x the footprint of ${pClean}.`;
+    return {
+      before: `${pClean} primary site is roughly`,
+      multiple: `${(pHa / cHa).toFixed(1)}x`,
+      after: `the footprint of ${cClean}.`
+    };
   }
+  return {
+    before: `${cClean} primary site is roughly`,
+    multiple: `${(cHa / pHa).toFixed(1)}x`,
+    after: `the footprint of ${pClean}.`
+  };
+}
+
+function renderRatioLine(ratio: RatioLine | null): string {
+  if (!ratio) return '';
+  return `
+    <div class="compare-ratio">
+      <span class="compare-ratio-text">${esc(ratio.before)}</span>
+      ${ratio.multiple ? `<span class="compare-ratio-multiple">${esc(ratio.multiple)}</span>` : ''}
+      ${ratio.after ? `<span class="compare-ratio-text">${esc(ratio.after)}</span>` : ''}
+    </div>
+  `;
 }
 
 // --- Synthesis -----------------------------------------------------------
 //
 // Arithmetic over values this page has already fetched and displayed. No API
-// call, no model call, no inference. Each line states what a number IS; none
+// call, no model call, no inference. Each row states what a number IS; none
 // states what it means, predicts, or recommends.
 //
 // Guardrail: a panel that is loading, empty, refused, unreachable or
-// rate-limited contributes NO section at all. Nothing here substitutes a
+// rate-limited contributes NO column at all. Nothing here substitutes a
 // default or a placeholder for a figure we do not have.
+//
+// Each row is a figure with a label beneath it — the figure is the content and
+// carries the only meaningful colour on the page:
+//   'down' for the drawdown and the down-day count
+//   'up'   for the up-day count and a close in the top half of its range
+//   'ink'  for everything else. Labels are never tinted.
+
+type SynthesisTone = 'ink' | 'up' | 'down';
+
+interface SynthesisRow {
+  // Pre-built HTML when a single row needs two differently toned figures
+  // (up days / down days); otherwise plain text.
+  figure: string;
+  label: string;
+  tone?: SynthesisTone;
+  figureIsHtml?: boolean;
+}
 
 interface SynthesisGroup {
-  label: string;
-  lines: string[];
+  heading: string;
+  rows: SynthesisRow[];
 }
 
-// Figures are wrapped so they can be set in tabular-nums.
-function fig(value: string | number): string {
-  return `<span class="syn-figure">${esc(String(value))}</span>`;
-}
+const MAX_ROWS_PER_COLUMN = 4;
 
 function ordinal(n: number): string {
   const rem100 = n % 100;
@@ -659,6 +703,14 @@ function dailyReturns(closes: number[]): number[] {
   return returns;
 }
 
+// Short date used inside labels, e.g. "19 May".
+function shortDate(dateStr: string): string {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+}
+
 function priceSynthesisGroup(): SynthesisGroup | null {
   // Only a fully resolved price panel contributes. A stale/rate-limited panel
   // carries figures we cannot date confidently, so it is omitted entirely.
@@ -670,18 +722,17 @@ function priceSynthesisGroup(): SynthesisGroup | null {
   const min = Math.min(...closes);
   const max = Math.max(...closes);
   const last = closes[closes.length - 1];
-  const lines: string[] = [];
+  const rows: SynthesisRow[] = [];
 
   // Position of the last close within the window's range.
   if (max > min) {
     const pct = ((last - min) / (max - min)) * 100;
-    const position =
-      pct <= 50
-        ? `bottom ${fig(`${Math.round(pct)}%`)}`
-        : `top ${fig(`${Math.round(100 - pct)}%`)}`;
-    lines.push(
-      `Closed at ${fig(`$${last.toFixed(2)}`)}, in the ${position} of its ${fig(prices.length)}-day range.`
-    );
+    const inTopHalf = pct > 50;
+    rows.push({
+      figure: inTopHalf ? `Top ${Math.round(100 - pct)}%` : `Bottom ${Math.round(pct)}%`,
+      label: `Position in its ${prices.length}-day range, closed $${last.toFixed(2)}`,
+      tone: inTopHalf ? 'up' : 'ink'
+    });
   }
 
   // Maximum peak-to-trough decline over the window.
@@ -703,9 +754,11 @@ function priceSynthesisGroup(): SynthesisGroup | null {
     }
   }
   if (worst < 0) {
-    lines.push(
-      `Maximum drawdown of ${fig(`${(Math.abs(worst) * 100).toFixed(1)}%`)}, from ${fig(formatDate(prices[worstPeakIdx].date))} to ${fig(formatDate(prices[worstTroughIdx].date))}.`
-    );
+    rows.push({
+      figure: `${(Math.abs(worst) * 100).toFixed(1)}%`,
+      label: `Maximum drawdown, ${shortDate(prices[worstPeakIdx].date)} to ${shortDate(prices[worstTroughIdx].date)}`,
+      tone: 'down'
+    });
   }
 
   const returns = dailyReturns(closes);
@@ -714,18 +767,24 @@ function priceSynthesisGroup(): SynthesisGroup | null {
     const variance =
       returns.reduce((acc, r) => acc + (r - mean) ** 2, 0) / (returns.length - 1);
     const annualised = Math.sqrt(variance) * Math.sqrt(252) * 100;
-    lines.push(
-      `Realised volatility of ${fig(`${annualised.toFixed(1)}%`)}, annualised from ${fig(returns.length)} daily returns.`
-    );
+    rows.push({
+      figure: `${annualised.toFixed(1)}%`,
+      label: `Realised volatility, annualised from ${returns.length} daily returns`,
+      tone: 'ink'
+    });
   }
 
   if (returns.length > 0) {
     const up = returns.filter((r) => r > 0).length;
     const down = returns.filter((r) => r < 0).length;
-    lines.push(`${fig(up)} up days, ${fig(down)} down days.`);
+    rows.push({
+      figure: `<span class="syn-up">${up}</span><span class="syn-divider"> / </span><span class="syn-down">${down}</span>`,
+      figureIsHtml: true,
+      label: 'Up days and down days'
+    });
   }
 
-  return lines.length > 0 ? { label: 'Price', lines } : null;
+  return rows.length > 0 ? { heading: 'Price', rows: rows.slice(0, MAX_ROWS_PER_COLUMN) } : null;
 }
 
 function coverageSynthesisGroup(): SynthesisGroup | null {
@@ -751,11 +810,18 @@ function coverageSynthesisGroup(): SynthesisGroup | null {
     }
   }
 
-  const lines: string[] = [];
+  const rows: SynthesisRow[] = [];
   if (recent + older > 0) {
-    lines.push(
-      `${fig(recent)} of ${fig(total)} results published in the last 90 days, ${fig(older)} older.`
-    );
+    rows.push({
+      figure: `${recent} of ${total}`,
+      label: 'Results published in the last 90 days',
+      tone: 'ink'
+    });
+    rows.push({
+      figure: `${older}`,
+      label: older === 1 ? 'Result older than 90 days' : 'Results older than 90 days',
+      tone: 'ink'
+    });
   }
 
   let topSection = '';
@@ -767,21 +833,23 @@ function coverageSynthesisGroup(): SynthesisGroup | null {
     }
   }
   if (topSection) {
-    lines.push(
-      `Most frequent section is ${esc(topSection)}, ${fig(topCount)} of ${fig(total)} results.`
-    );
+    rows.push({
+      figure: topSection,
+      label: `Most frequent section, ${topCount} of ${total} results`,
+      tone: 'ink'
+    });
   }
 
   if (newestMs !== null) {
     const days = Math.max(0, Math.floor((now - newestMs) / (24 * 60 * 60 * 1000)));
-    lines.push(
-      days === 1
-        ? `Most recent article is ${fig(1)} day old.`
-        : `Most recent article is ${fig(days)} days old.`
-    );
+    rows.push({
+      figure: days === 1 ? '1 day' : `${days} days`,
+      label: 'Age of the most recent article',
+      tone: 'ink'
+    });
   }
 
-  return lines.length > 0 ? { label: 'Coverage', lines } : null;
+  return rows.length > 0 ? { heading: 'Coverage', rows: rows.slice(0, MAX_ROWS_PER_COLUMN) } : null;
 }
 
 function siteSynthesisGroup(): SynthesisGroup | null {
@@ -790,7 +858,8 @@ function siteSynthesisGroup(): SynthesisGroup | null {
 
   const symbol = state.selectedCompany?.symbol;
   if (!symbol) return null;
-  const footprint = state.selectedCompany?.facility?.footprintHa ?? FACILITIES[symbol]?.footprintHa;
+  const facility = state.selectedCompany?.facility;
+  const footprint = facility?.footprintHa ?? FACILITIES[symbol]?.footprintHa;
   if (typeof footprint !== 'number' || !Number.isFinite(footprint)) return null;
 
   const mapped = Object.values(FACILITIES).filter(
@@ -802,12 +871,36 @@ function siteSynthesisGroup(): SynthesisGroup | null {
   const rank = ranked.findIndex((f) => f.symbol === symbol) + 1;
   if (rank === 0) return null;
 
-  return {
-    label: 'Site',
-    lines: [
-      `${fig(ordinal(rank))} largest of ${fig(mapped.length)} mapped sites by footprint, at ${fig(`${footprint} ha`)}.`
-    ]
-  };
+  const rows: SynthesisRow[] = [
+    {
+      figure: `${ordinal(rank)} of ${mapped.length}`,
+      label: 'Rank by footprint among mapped sites',
+      tone: 'ink'
+    },
+    {
+      figure: `${footprint} ha`,
+      label: facility?.measuredOn
+        ? `Site footprint, entered by hand ${facility.measuredOn}`
+        : 'Site footprint',
+      tone: 'ink'
+    }
+  ];
+
+  if (facility?.siteType) {
+    rows.push({ figure: facility.siteType, label: 'Site type', tone: 'ink' });
+  }
+
+  return { heading: 'Site', rows: rows.slice(0, MAX_ROWS_PER_COLUMN) };
+}
+
+function renderSynthesisRow(row: SynthesisRow): string {
+  const toneClass = row.tone === 'up' ? 'syn-up' : row.tone === 'down' ? 'syn-down' : '';
+  return `
+    <div class="synthesis-row">
+      <span class="synthesis-figure ${toneClass}">${row.figureIsHtml ? row.figure : esc(row.figure)}</span>
+      <span class="synthesis-row-label">${esc(row.label)}</span>
+    </div>
+  `;
 }
 
 function renderSynthesisSection(): string {
@@ -820,13 +913,13 @@ function renderSynthesisSection(): string {
     groups.length === 0
       ? `<p class="synthesis-pending">No panel has resolved figures to compute from yet.</p>`
       : `
-        <div class="synthesis-column">
+        <div class="synthesis-columns">
           ${groups
             .map(
               (group) => `
-            <div class="synthesis-group">
-              <span class="synthesis-group-label">${esc(group.label)}</span>
-              ${group.lines.map((line) => `<p class="synthesis-line">${line}</p>`).join('')}
+            <div class="synthesis-column">
+              <h3 class="synthesis-column-heading">${esc(group.heading)}</h3>
+              ${group.rows.map(renderSynthesisRow).join('')}
             </div>
           `
             )
@@ -848,7 +941,7 @@ function renderSynthesisSection(): string {
       </button>
       <div
         id="synthesis-output"
-        class="synthesis-output ${isOpen ? 'is-expanded' : 'is-collapsed'}"
+        class="synthesis-band ${isOpen ? 'is-expanded' : 'is-collapsed'}"
         ${isOpen ? '' : 'hidden'}
       >
         ${body}
@@ -1221,65 +1314,50 @@ function render() {
           ${
             state.compareSymbol && FACILITIES[state.compareSymbol]
               ? `
-            <!-- COMPARE MODE: Split into side-by-side tile grids AT THE SAME ZOOM, collapsed to stacked under 820px -->
-            <div class="grid grid-cols-1 min-[820px]:grid-cols-2 gap-4">
+            <!-- COMPARE MODE: two viewports at the SAME zoom with matched
+                 overlays. No price overlay on either: we fetch prices for the
+                 primary company only, so showing a change on one image and
+                 nothing on the other invited a comparison the data does not
+                 support. Both carry name, ticker and facility only, and the
+                 footprint ratio — the actual point of the mode — sits between
+                 them. Stacks to one column under 820px. -->
+            <div class="compare-grid">
               <!-- Primary Company -->
-              <div class="flex flex-col">
+              <div class="compare-column">
                 <div class="compare-viewport-container">
                   ${renderViewportContent(state.satelliteState, state.satelliteSource, state.satelliteTiles, state.satelliteImageUrl, facilityLabel)}
                   <div class="hero-scrim-overlay">
-                    <h1 class="hero-company-name" style="font-size: 1.35rem;">${esc(name)}</h1>
-                    <div class="hero-meta-row" style="font-size: 0.75rem;">
+                    <h1 class="hero-company-name compare-hero-name">${esc(name)}</h1>
+                    <div class="hero-meta-row compare-hero-meta">
                       <span class="hero-ticker">${esc(symbol)}</span>
                       ${region && region !== '—' ? `<span>·</span><span>${esc(region)}</span>` : ''}
                     </div>
-                    ${
-                      ninetyDayDiffStr && lastCloseVal !== null
-                        ? `
-                      <div class="hero-price-change ${ninetyDayIsPos ? 'up' : 'down'}" style="font-size: 1.8rem; margin-top: 0.25rem;">
-                        ${ninetyDayDiffStr}
-                      </div>
-                      <div class="hero-last-close-line" style="font-size: 0.72rem;">
-                        Last close: <strong>$${lastCloseVal.toFixed(2)}</strong> · ${lastCloseDateStr}
-                      </div>
-                    `
-                        : ''
-                    }
-                    <div class="hero-facility-label" style="font-size: 0.72rem; margin-top: 0.2rem;">${esc(facilityLabel)}</div>
+                    <div class="hero-facility-label compare-hero-facility">${esc(facilityLabel)}</div>
                   </div>
                 </div>
                 ${renderFacilityMetaRow(comp?.facility, { drawerId: 'profile-details-primary', provenance: satelliteProvenance, compareControl })}
               </div>
 
+              <!-- Footprint ratio, centred between the pair -->
+              ${renderRatioLine(computeRatioLine(name, comp?.facility, FACILITIES[state.compareSymbol]))}
+
               <!-- Compared Company -->
-              <div class="flex flex-col">
+              <div class="compare-column">
                 <div class="compare-viewport-container">
                   ${renderViewportContent(state.compareState, state.compareSource, state.compareTiles, state.compareImageUrl, FACILITIES[state.compareSymbol].label)}
                   <div class="hero-scrim-overlay">
-                    <div class="hero-company-name" style="font-size: 1.35rem;">${FACILITIES[state.compareSymbol].name}</div>
-                    <div class="hero-meta-row" style="font-size: 0.75rem;">
-                      <span class="hero-ticker">${FACILITIES[state.compareSymbol].symbol}</span>
+                    <div class="hero-company-name compare-hero-name">${esc(FACILITIES[state.compareSymbol].name)}</div>
+                    <div class="hero-meta-row compare-hero-meta">
+                      <span class="hero-ticker">${esc(FACILITIES[state.compareSymbol].symbol)}</span>
                       <span>·</span>
                       <span>Comparison</span>
                     </div>
-                    <div class="hero-facility-label" style="font-size: 0.72rem; margin-top: 0.2rem;">${FACILITIES[state.compareSymbol].label}</div>
+                    <div class="hero-facility-label compare-hero-facility">${esc(FACILITIES[state.compareSymbol].label)}</div>
                   </div>
                 </div>
                 ${renderFacilityMetaRow(FACILITIES[state.compareSymbol], { drawerId: 'profile-details-compare' })}
               </div>
             </div>
-
-            <!-- Ratio line under the pair -->
-            ${(() => {
-              const ratioLine = computeRatioLine(name, comp?.facility, FACILITIES[state.compareSymbol]);
-              return ratioLine
-                ? `
-              <div style="margin-top: 0.75rem; padding: 0.4rem 0; border-top: 1px solid var(--rule); font-size: 0.75rem; color: var(--ink); font-variant-numeric: tabular-nums;">
-                ${esc(ratioLine)}
-              </div>
-            `
-                : '';
-            })()}
           `
               : state.satelliteState === 'no-facility' || state.satelliteState === 'refused' || state.satelliteState === 'unreachable'
               ? `
